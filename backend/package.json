@@ -1,0 +1,17 @@
+{
+  "name": "hrmcs-backend",
+  "version": "1.0.0",
+  "description": "Hospital Resource Management and Coordination System backend",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node tests/hospital-flow.test.js && node tests/recommendation.test.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.0",
+    "express": "^4.21.0",
+    "jsonwebtoken": "^9.0.3",
+    "sqlite3": "^5.1.7"
+  }
+}

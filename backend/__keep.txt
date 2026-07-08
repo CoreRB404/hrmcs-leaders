@@ -1,0 +1,1 @@
+SQLite-backed storage is now active; the old JSON database snapshots are no longer needed.
