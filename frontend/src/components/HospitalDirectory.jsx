@@ -1,6 +1,6 @@
 import React from 'react';
 
-function HospitalDirectory({ hospitalSearch, setHospitalSearch, hospitals, getHospitalName }) {
+function HospitalDirectory({ hospitalSearch, setHospitalSearch, hospitals, getHospitalName, currentHospital, updateHospitalEmergencyStatus }) {
   const filteredHospitals = hospitals.filter((hospital) => {
     const query = hospitalSearch.toLowerCase();
     return !query || [hospital.name, hospital.location, hospital.type, hospital.visibility].some((value) => value.toLowerCase().includes(query));
@@ -38,7 +38,19 @@ function HospitalDirectory({ hospitalSearch, setHospitalSearch, hospitals, getHo
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               {hospital.accountStatus && hospital.accountStatus !== 'Active' ? <span className="badge pending">{hospital.accountStatus}</span> : null}
-              <span className="badge">{hospital.emergencyStatus}</span>
+              {currentHospital?.role === 'Admin' ? (
+                <select
+                  value={hospital.emergencyStatus || 'Medium'}
+                  onChange={(e) => updateHospitalEmergencyStatus(hospital.id, e.target.value)}
+                  style={{ minWidth: 120, padding: '8px 10px', borderRadius: 6, border: '1px solid #d1d5db' }}
+                >
+                  <option value="Low">Low</option>
+                  <option value="Medium">Medium</option>
+                  <option value="High">High</option>
+                </select>
+              ) : (
+                <span className="badge">{hospital.emergencyStatus || 'Medium'}</span>
+              )}
             </div>
           </div>
         )) : (

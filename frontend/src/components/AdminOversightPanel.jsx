@@ -17,7 +17,10 @@ function AdminOversightPanel({
     { icon: '🏥', label: 'Hospitals', value: adminSummaryResolved.totalHospitals },
     { icon: '📋', label: 'Pending requests', value: adminSummaryResolved.pendingRequests },
     { icon: '✅', label: 'Approved', value: adminSummaryResolved.approvedRequests },
-    { icon: '⏳', label: 'Provider decisions', value: adminSummaryResolved.pendingProviderApprovals },
+    { icon: '💊', label: 'Pharmacist reviews', value: adminSummaryResolved.pendingPharmacistApprovals || 0 },
+    { icon: '🩺', label: 'Doctor reviews', value: adminSummaryResolved.pendingDoctorApprovals || 0 },
+    { icon: '⏳', label: 'Hospital decisions', value: adminSummaryResolved.pendingProviderApprovals },
+    { icon: '🛑', label: 'Admin approvals', value: adminSummaryResolved.pendingAdminApprovals || 0 },
     { icon: '🏥', label: 'Hospital approvals', value: adminSummaryResolved.pendingHospitalApprovals },
   ];
 
@@ -56,6 +59,7 @@ function AdminOversightPanel({
                   <div>
                     <strong>{hospital.name}</strong>
                     <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: 2 }}>{hospital.location} · {hospital.type}</div>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-tertiary)', marginTop: 2 }}>{hospital.email}</div>
                   </div>
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
@@ -143,35 +147,6 @@ function AdminOversightPanel({
         </div>
       </section>
 
-      <section className="admin-subsection" style={{ marginTop: 16 }}>
-        <div className="section-header">
-          <h3>Manage accounts <span className="result-count">{hospitals.length}</span></h3>
-          <span className="section-note">Delete active or pending accounts</span>
-        </div>
-        <div className="stack">
-          {hospitals.length ? hospitals.map((hospital) => (
-            <div key={hospital.id} className="list-item">
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <div className="sidebar-avatar" style={{ width: 36, height: 36, fontSize: '0.85rem', flexShrink: 0 }}>
-                  {hospital.name?.charAt(0) || 'H'}
-                </div>
-                <div>
-                  <strong>{hospital.name}</strong>
-                  <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: 2 }}>{hospital.location} · {hospital.type} · {hospital.accountStatus}</div>
-                </div>
-              </div>
-              <button className="action-reject" onClick={() => deleteHospital(hospital.id)}>
-                {hospital.id === currentHospital?.id ? 'Delete your account' : 'Delete'}
-              </button>
-            </div>
-          )) : (
-            <div className="empty-state">
-              <div className="empty-state-icon">🏥</div>
-              No hospital accounts available.
-            </div>
-          )}
-        </div>
-      </section>
     </section>
   );
 }

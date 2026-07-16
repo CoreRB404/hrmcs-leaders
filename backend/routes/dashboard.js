@@ -8,7 +8,7 @@ const router = express.Router();
 async function getDashboard(req, res) {
   try {
     await data.initializeState();
-    const hospitals = data.getHospitals();
+    const hospitals = data.getHospitals().filter((hospital) => hospital.role === 'Hospital');
     const inventory = data.getInventory();
     const staff = data.getStaff();
     const requests = data.getRequests();
@@ -33,6 +33,11 @@ async function getDashboard(req, res) {
 async function getHospitalDashboard(req, res) {
   try {
     await data.initializeState();
+    const workspaceHospitalId = req.auth.hospitalId || req.auth.id;
+    if (req.auth.role !== 'Admin' && workspaceHospitalId !== req.params.hospitalId) {
+      return res.status(403).json({ error: 'You cannot access another hospital workspace' });
+    }
+
     const hospital = data.getHospitals().find((entry) => entry.id === req.params.hospitalId);
     if (!hospital) {
       return res.status(404).json({ error: 'Hospital not found' });
@@ -41,7 +46,8 @@ async function getHospitalDashboard(req, res) {
     const hospitalInventory = data.getInventory().filter((item) => item.hospitalId === hospital.id);
     const hospitalRequests = data.getRequests().filter((request) => request.requesterHospitalId === hospital.id || request.providerHospitalId === hospital.id || request.hospitalId === hospital.id);
     const hospitalStaff = data.getStaff().filter((staff) => staff.hospitalId === hospital.id);
-    res.json({ hospital, hospitalInventory, hospitalRequests, hospitalStaff });
+    const { password, ...publicHospital } = hospital;
+    res.json({ hospital: publicHospital, hospitalInventory, hospitalRequests, hospitalStaff });
   } catch (error) {
     console.error('Hospital dashboard error', error);
     res.status(500).json({ error: 'Unable to load hospital dashboard' });

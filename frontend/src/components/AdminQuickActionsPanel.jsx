@@ -6,14 +6,14 @@ function AdminQuickActionsPanel({ pendingProviderRequests, adminSummaryResolved 
       <div className="panel-header">
         <div>
           <h2 id="admin-quick-actions-heading">Admin quick actions</h2>
-          <p className="subhead">At-a-glance status of pending operations and provider decisions.</p>
+          <p className="subhead">At-a-glance status of pending operations and hospital decisions.</p>
         </div>
         <span className="badge">Fast tasks</span>
       </div>
       <div className="admin-overview-grid" style={{ marginBottom: 16 }}>
         <div className="admin-stat-card">
           <div className="stat-icon">📋</div>
-          <div className="label">Provider responses</div>
+          <div className="label">Hospital responses</div>
           <div className="value">{pendingProviderRequests.length}</div>
         </div>
         <div className="admin-stat-card">
@@ -31,12 +31,12 @@ function AdminQuickActionsPanel({ pendingProviderRequests, adminSummaryResolved 
                 {request.quantity} units · {request.requestType || 'Borrow'}
               </div>
             </div>
-            <span className="badge pending">Provider pending</span>
+            <span className="badge pending">Hospital pending</span>
           </div>
         )) : (
           <div className="empty-state">
             <div className="empty-state-icon">✅</div>
-            No pending provider decisions.
+            No pending hospital decisions.
           </div>
         )}
       </div>

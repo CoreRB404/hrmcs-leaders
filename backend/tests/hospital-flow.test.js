@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { resetDemoData } = require('../data');
 const data = require('../data');
-const { registerHospital, addResourceListing, createResourceRequest, respondToRequest, approveRequest, createPatientSupportRequest, getAdminSummary } = require('../utils/hospitalService');
+const { registerHospital, addResourceListing, createResourceRequest, respondToRequest, reviewRequestClinicalStage, approveRequest, createPatientSupportRequest, getAdminSummary } = require('../utils/hospitalService');
 
 test('integrated hospital flows: registration, listing, request lifecycle, patient-support', async () => {
   // Run full flow sequentially to avoid test-worker races
@@ -20,6 +20,15 @@ test('integrated hospital flows: registration, listing, request lifecycle, patie
   assert.equal(hospital.name, 'Hospital G');
   assert.equal(hospital.visibility, 'Public');
   assert.equal(hospital.accountStatus, 'Pending');
+  assert.equal(hospital.password, undefined);
+  assert.ok(hospital.reviewerCredentials.doctor.email);
+  assert.equal(hospital.reviewerCredentials.doctor.password, 'Doctor@1234');
+  assert.ok(hospital.reviewerCredentials.pharmacist.email);
+  assert.equal(hospital.reviewerCredentials.pharmacist.password, 'Pharmacist@1234');
+  const generatedReviewers = data.getHospitals().filter((entry) => entry.hospitalId === hospital.id);
+  assert.deepEqual(generatedReviewers.map((entry) => entry.role).sort(), ['Doctor', 'Pharmacist']);
+  assert.ok(generatedReviewers.every((entry) => entry.accountStatus === 'Pending'));
+  assert.ok(generatedReviewers.every((entry) => !['Doctor@1234', 'Pharmacist@1234'].includes(entry.password)));
 
   // publish listing and create request
   const state = data.getState();
@@ -54,7 +63,25 @@ test('integrated hospital flows: registration, listing, request lifecycle, patie
   assert.ok(summary.totalHospitals >= 3);
   assert.equal(summary.totalTransactions, 6);
 
-  // provider approves
+  // pharmacist then doctor review before the receiving hospital responds
+  const pharmacistReview = reviewRequestClinicalStage({
+    requestId: request.id,
+    reviewerHospitalId: hospital.id,
+    reviewerRole: 'Pharmacist',
+    decision: 'approve',
+    notes: 'Pharmacy verification complete',
+  });
+  assert.equal(pharmacistReview.pharmacistApproval, 'Approved');
+
+  const doctorReview = reviewRequestClinicalStage({
+    requestId: request.id,
+    reviewerHospitalId: hospital.id,
+    reviewerRole: 'Doctor',
+    decision: 'approve',
+    notes: 'Clinical oversight complete',
+  });
+  assert.equal(doctorReview.doctorApproval, 'Approved');
+
   const providerResponse = respondToRequest({
     requestId: request.id,
     responderHospitalId: hospital.id,
@@ -67,7 +94,7 @@ test('integrated hospital flows: registration, listing, request lifecycle, patie
   // admin approves and finalizes inventory
   const finalRequest = approveRequest({
     requestId: request.id,
-    approverHospitalId: 'hospital-a',
+    approverHospitalId: 'hospital-admin',
   });
   assert.equal(finalRequest.status, 'Approved');
   assert.equal(finalRequest.providerApproval, 'Approved');
@@ -91,7 +118,7 @@ test('integrated hospital flows: registration, listing, request lifecycle, patie
   assert.equal(supportRequest.priority, 'High');
 });
 
-test('admin approval finalizes a pending request even before provider approval', async () => {
+test('clinical approval order must be followed before admin final approval', async () => {
   await resetDemoData();
 
   const hospital = registerHospital({
@@ -128,11 +155,43 @@ test('admin approval finalizes a pending request even before provider approval',
   assert.equal(request.status, 'Pending');
   assert.equal(request.providerApproval, 'Pending');
 
-  const approvedRequest = approveRequest({
+  assert.throws(() => respondToRequest({
     requestId: request.id,
-    approverHospitalId: 'hospital-admin',
+    responderHospitalId: hospital.id,
+    response: 'approve',
+    notes: 'Hospital attempted approval too early',
+  }), /Pharmacist approval must be completed before hospital approval/);
+
+  assert.throws(() => reviewRequestClinicalStage({
+    requestId: request.id,
+    reviewerHospitalId: hospital.id,
+    reviewerRole: 'Doctor',
+    decision: 'approve',
+  }), /Pharmacist approval must be recorded before doctor review/);
+
+  assert.throws(() => reviewRequestClinicalStage({
+    requestId: request.id,
+    reviewerHospitalId: 'hospital-eastbay',
+    reviewerRole: 'Pharmacist',
+    decision: 'approve',
+  }), /must belong to the provider hospital for this request/);
+
+  reviewRequestClinicalStage({
+    requestId: request.id,
+    reviewerHospitalId: hospital.id,
+    reviewerRole: 'Pharmacist',
+    decision: 'approve',
   });
 
-  assert.equal(approvedRequest.status, 'Approved');
-  assert.equal(approvedRequest.providerApproval, 'Approved');
+  reviewRequestClinicalStage({
+    requestId: request.id,
+    reviewerHospitalId: hospital.id,
+    reviewerRole: 'Doctor',
+    decision: 'approve',
+  });
+
+  assert.throws(() => approveRequest({
+    requestId: request.id,
+    approverHospitalId: 'hospital-admin',
+  }), /Hospital approval must be completed before admin approval/);
 });

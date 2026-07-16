@@ -1,8 +1,8 @@
 const express = require('express');
 const data = require('../data');
-const { createResourceRequest, respondToRequest, approveRequest } = require('../utils/hospitalService');
+const { createResourceRequest, respondToRequest, reviewRequestClinicalStage, approveRequest } = require('../utils/hospitalService');
 const { recommendHospitals } = require('../utils/recommendation');
-const { authMiddleware, requireAdmin, denyAdmin } = require('../utils/auth');
+const { authMiddleware, requireAdmin, requireRole, denyAdmin } = require('../utils/auth');
 
 const router = express.Router();
 
@@ -19,6 +19,9 @@ router.get('/', authMiddleware, async (req, res) => {
     if (userRole === 'Admin') {
       // Admin sees all requests
       res.json(allRequests);
+    } else if (['Doctor', 'Pharmacist'].includes(userRole)) {
+      const reviewerHospitalId = req.auth.hospitalId || userId;
+      res.json(allRequests.filter((request) => request.providerHospitalId === reviewerHospitalId));
     } else {
       // Hospital users only see requests where they are requester OR provider
       const filtered = allRequests.filter((request) => {
@@ -55,7 +58,7 @@ router.post('/', authMiddleware, denyAdmin, async (req, res) => {
     }
 
     const request = createResourceRequest(req.body);
-    const suggestions = recommendHospitals({ currentHospitalId: requesterHospitalId, resourceName, quantity });
+    const suggestions = await recommendHospitals({ currentHospitalId: requesterHospitalId, resourceName, quantity });
     res.json({ request, suggestions });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -71,6 +74,50 @@ router.post('/:id/respond', authMiddleware, denyAdmin, async (req, res) => {
     res.json(request);
   } catch (error) {
     res.status(403).json({ error: error.message });
+  }
+});
+
+// POST /api/requests/:id/pharmacist-review
+router.post('/:id/pharmacist-review', authMiddleware, async (req, res) => {
+  try {
+    await data.initializeState();
+    const reviewerHospitalId = req.auth.hospitalId || req.auth.id;
+    if (req.auth.role !== 'Pharmacist') {
+      return res.status(403).json({ error: 'Pharmacist access required' });
+    }
+
+    const request = reviewRequestClinicalStage({
+      requestId: req.params.id,
+      reviewerHospitalId,
+      reviewerRole: 'Pharmacist',
+      decision: req.body.decision,
+      notes: req.body.notes,
+    });
+    res.json({ request });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+// POST /api/requests/:id/doctor-review
+router.post('/:id/doctor-review', authMiddleware, async (req, res) => {
+  try {
+    await data.initializeState();
+    const reviewerHospitalId = req.auth.hospitalId || req.auth.id;
+    if (req.auth.role !== 'Doctor') {
+      return res.status(403).json({ error: 'Doctor access required' });
+    }
+
+    const request = reviewRequestClinicalStage({
+      requestId: req.params.id,
+      reviewerHospitalId,
+      reviewerRole: 'Doctor',
+      decision: req.body.decision,
+      notes: req.body.notes,
+    });
+    res.json({ request });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
   }
 });
 

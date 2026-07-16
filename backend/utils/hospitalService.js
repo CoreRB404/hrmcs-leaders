@@ -1,5 +1,6 @@
 const data = require('../data');
 const { hashPassword } = require('./auth');
+const { rememberHospitalEmail } = require('../sqlite');
 
 function getInventoryItem(hospitalId, resourceName) {
   return data.getInventory().find((item) => item.hospitalId === hospitalId && item.resourceName.toLowerCase() === resourceName.toLowerCase());
@@ -24,6 +25,7 @@ function reserveInventoryItem(hospitalId, resourceName, quantity) {
   const state = data.getState();
   state.inventory = inventory;
   data.setState(state);
+  data.persistInventoryItem(item);
   return item;
 }
 
@@ -42,6 +44,7 @@ function finalizeInventoryReservation(request) {
   const state = data.getState();
   state.inventory = inventory;
   data.setState(state);
+  data.persistInventoryItem(item);
 }
 
 function releaseInventoryReservation(request) {
@@ -57,9 +60,10 @@ function releaseInventoryReservation(request) {
   const state = data.getState();
   state.inventory = inventory;
   data.setState(state);
+  data.persistInventoryItem(item);
 }
 
-function registerHospital({ name, location, email, password, visibility, type, role = 'Hospital' }) {
+function registerHospital({ name, location, email, password, visibility, type, role = 'Hospital', emergencyStatus }) {
   const hospitals = data.getHospitals();
   const notifications = data.getNotifications();
 
@@ -68,8 +72,11 @@ function registerHospital({ name, location, email, password, visibility, type, r
     throw new Error('A hospital with this email already exists');
   }
 
+  const normalizedEmergencyStatus = emergencyStatus == null ? 'Medium' : emergencyStatus;
+
+  const hospitalId = `hospital-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const hospital = {
-    id: `hospital-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    id: hospitalId,
     name,
     location,
     email,
@@ -79,7 +86,7 @@ function registerHospital({ name, location, email, password, visibility, type, r
     role,
     accountStatus: 'Pending',
     createdAt: new Date().toISOString(),
-    emergencyStatus: 'Medium',
+    emergencyStatus: normalizedEmergencyStatus,
     capacity: 200,
     availableBeds: 40,
     availableIcu: 6,
@@ -87,7 +94,67 @@ function registerHospital({ name, location, email, password, visibility, type, r
     distance: 0,
   };
 
-  hospitals.push(hospital);
+  const reviewerCredentials = role === 'Hospital' ? (() => {
+    const [rawLocalPart, rawDomain = 'hrmcs.local'] = String(email).toLowerCase().split('@');
+    const localPart = rawLocalPart.replace(/[^a-z0-9._-]/g, '') || 'hospital';
+    const domain = rawDomain.replace(/[^a-z0-9.-]/g, '') || 'hrmcs.local';
+    const uniqueKey = hospitalId.split('-').pop();
+    return {
+      doctor: {
+        email: `doctor.${localPart}.${uniqueKey}@${domain}`,
+        password: 'Doctor@1234',
+      },
+      pharmacist: {
+        email: `pharmacist.${localPart}.${uniqueKey}@${domain}`,
+        password: 'Pharmacist@1234',
+      },
+    };
+  })() : null;
+
+  const reviewerAccounts = reviewerCredentials ? [
+    {
+      id: `reviewer-${hospitalId}-doctor`,
+      hospitalId,
+      name: `${name} Doctor`,
+      location,
+      email: reviewerCredentials.doctor.email,
+      password: hashPassword(reviewerCredentials.doctor.password),
+      visibility: 'Private',
+      type: 'Clinical',
+      role: 'Doctor',
+      accountStatus: 'Pending',
+      createdAt: hospital.createdAt,
+      emergencyStatus: normalizedEmergencyStatus,
+      capacity: 0,
+      availableBeds: 0,
+      availableIcu: 0,
+      availableAmbulances: 0,
+      distance: 0,
+    },
+    {
+      id: `reviewer-${hospitalId}-pharmacist`,
+      hospitalId,
+      name: `${name} Pharmacist`,
+      location,
+      email: reviewerCredentials.pharmacist.email,
+      password: hashPassword(reviewerCredentials.pharmacist.password),
+      visibility: 'Private',
+      type: 'Pharmacy',
+      role: 'Pharmacist',
+      accountStatus: 'Pending',
+      createdAt: hospital.createdAt,
+      emergencyStatus: normalizedEmergencyStatus,
+      capacity: 0,
+      availableBeds: 0,
+      availableIcu: 0,
+      availableAmbulances: 0,
+      distance: 0,
+    },
+  ] : [];
+
+  hospitals.push(hospital, ...reviewerAccounts);
+  rememberHospitalEmail(hospital);
+  reviewerAccounts.forEach(rememberHospitalEmail);
   const state = data.getState();
   state.hospitals = hospitals;
   state.notifications = notifications;
@@ -100,6 +167,38 @@ function registerHospital({ name, location, email, password, visibility, type, r
   data.setState(state);
 
   // Persist to SQLite
+  data.persistHospital(hospital);
+  reviewerAccounts.forEach((reviewer) => data.persistHospital(reviewer));
+
+  const { password: passwordHash, ...publicHospital } = hospital;
+  return { ...publicHospital, reviewerCredentials };
+}
+
+function updateHospitalEmergencyStatus(hospitalId, emergencyStatus) {
+  const hospitals = data.getHospitals();
+  const notifications = data.getNotifications();
+  const hospital = hospitals.find((entry) => entry.id === hospitalId);
+
+  if (!hospital) {
+    throw new Error('Hospital not found');
+  }
+
+  const validStatuses = ['Low', 'Medium', 'High'];
+  if (!validStatuses.includes(emergencyStatus)) {
+    throw new Error('Invalid emergency status');
+  }
+
+  hospital.emergencyStatus = emergencyStatus;
+
+  const state = data.getState();
+  state.hospitals = hospitals;
+  state.notifications = [{
+    id: `notif-${Date.now()}`,
+    message: `${hospital.name} emergency status updated to ${emergencyStatus}`,
+    severity: 'Medium',
+    timestamp: new Date().toISOString(),
+  }, ...notifications];
+  data.setState(state);
   data.persistHospital(hospital);
 
   return hospital;
@@ -121,16 +220,18 @@ function addResourceListing({ hospitalId, resourceType, resourceName, quantity, 
     availableForOrder,
     status: 'Listed',
     minimumThreshold: 5,
+    createdAt: new Date().toISOString(),
   };
 
   inventory.push(listing);
   const state = data.getState();
   state.inventory = inventory;
   data.setState(state);
+  data.persistInventoryItem(listing);
   return listing;
 }
 
-function createResourceRequest({ requesterHospitalId, providerHospitalId, resourceName, quantity, requestType, notes }) {
+function createResourceRequest({ requesterHospitalId, providerHospitalId, resourceName, quantity, requestType, notes, urgency }) {
   const provider = data.getHospitals().find((hospital) => hospital.id === providerHospitalId);
   if (!provider || provider.accountStatus !== 'Active') {
     throw new Error('Provider hospital must be active to fulfill requests');
@@ -157,9 +258,14 @@ function createResourceRequest({ requesterHospitalId, providerHospitalId, resour
     quantity,
     requestType,
     notes,
+    urgency: urgency || 'Low',
     status: 'Pending',
     providerApproval: 'Pending',
+    pharmacistApproval: 'Pending',
+    doctorApproval: 'Pending',
     providerResponseNotes: '',
+    pharmacistApprovalNotes: '',
+    doctorApprovalNotes: '',
     history: [
       {
         id: `history-${Date.now()}-1`,
@@ -200,6 +306,15 @@ function respondToRequest({ requestId, responderHospitalId, response, notes }) {
   if (request.providerHospitalId !== responderHospitalId) {
     throw new Error('Not authorized to respond to this request');
   }
+  if (request.status !== 'Pending') {
+    throw new Error('Only pending requests can be responded to by the provider hospital');
+  }
+  if (request.pharmacistApproval !== 'Approved') {
+    throw new Error('Pharmacist approval must be completed before hospital approval');
+  }
+  if (request.doctorApproval !== 'Approved') {
+    throw new Error('Doctor approval must be completed before hospital approval');
+  }
 
   const status = response === 'approve' ? 'Approved' : 'Rejected';
   const responderName = data.getHospitals().find((h) => h.id === responderHospitalId)?.name || responderHospitalId;
@@ -236,6 +351,88 @@ function respondToRequest({ requestId, responderHospitalId, response, notes }) {
   return request;
 }
 
+function reviewRequestClinicalStage({ requestId, reviewerHospitalId, reviewerRole, decision, notes }) {
+  const requests = data.getRequests();
+  const notifications = data.getNotifications();
+  const request = requests.find((entry) => entry.id === requestId);
+  if (!request) {
+    throw new Error('Request not found');
+  }
+  if (request.status !== 'Pending') {
+    throw new Error('Only pending requests can move through clinical review');
+  }
+  if (reviewerRole === 'Pharmacist') {
+    if (request.providerHospitalId !== reviewerHospitalId) {
+      throw new Error('Pharmacist must belong to the provider hospital for this request');
+    }
+    if (request.pharmacistApproval !== 'Pending') {
+      throw new Error('Pharmacist approval has already been recorded for this request');
+    }
+    if (request.providerApproval !== 'Pending') {
+      throw new Error('Hospital approval must be completed after clinical review');
+    }
+    if (request.doctorApproval !== 'Pending') {
+      throw new Error('Doctor approval must be completed after pharmacist review for this request');
+    }
+    request.pharmacistApproval = decision === 'approve' ? 'Approved' : 'Rejected';
+    request.pharmacistApprovalNotes = notes || '';
+    request.history.push({
+      id: `history-${request.id}-${request.history.length + 1}`,
+      status: request.pharmacistApproval,
+      note: `Pharmacist ${request.pharmacistApproval.toLowerCase()} the request${notes ? `: ${notes}` : ''}`,
+      timestamp: new Date().toISOString(),
+    });
+    if (request.pharmacistApproval === 'Rejected') {
+      request.status = 'Rejected';
+      request.doctorApproval = 'Rejected';
+      request.providerApproval = 'Rejected';
+      releaseInventoryReservation(request);
+    }
+  } else if (reviewerRole === 'Doctor') {
+    if (request.providerHospitalId !== reviewerHospitalId) {
+      throw new Error('Doctor must belong to the provider hospital for this request');
+    }
+    if (request.pharmacistApproval !== 'Approved') {
+      throw new Error('Pharmacist approval must be recorded before doctor review can proceed');
+    }
+    if (request.doctorApproval !== 'Pending') {
+      throw new Error('Doctor approval has already been recorded for this request');
+    }
+    if (request.providerApproval !== 'Pending') {
+      throw new Error('Hospital approval must be completed after doctor review');
+    }
+    request.doctorApproval = decision === 'approve' ? 'Approved' : 'Rejected';
+    request.doctorApprovalNotes = notes || '';
+    request.history.push({
+      id: `history-${request.id}-${request.history.length + 1}`,
+      status: request.doctorApproval,
+      note: `Doctor ${request.doctorApproval.toLowerCase()} the request${notes ? `: ${notes}` : ''}`,
+      timestamp: new Date().toISOString(),
+    });
+    if (request.doctorApproval === 'Rejected') {
+      request.status = 'Rejected';
+      request.providerApproval = 'Rejected';
+      releaseInventoryReservation(request);
+    }
+  } else {
+    throw new Error('Reviewer role is not supported for clinical approval');
+  }
+
+  const state = data.getState();
+  state.requests = requests;
+  state.notifications = notifications;
+  notifications.unshift({
+    id: `notif-${Date.now()}`,
+    message: `${reviewerRole} ${decision === 'approve' ? 'approved' : 'rejected'} request ${requestId} for ${request.resourceName}`,
+    severity: decision === 'approve' ? 'Medium' : 'Low',
+    timestamp: new Date().toISOString(),
+  });
+  data.setState(state);
+  data.persistRequestUpdate(request);
+
+  return request;
+}
+
 function approveRequest({ requestId, approverHospitalId }) {
   const requests = data.getRequests();
   const notifications = data.getNotifications();
@@ -247,16 +444,14 @@ function approveRequest({ requestId, approverHospitalId }) {
   if (request.status !== 'Pending') {
     throw new Error('Only pending requests can be approved by admin');
   }
-
+  if (request.pharmacistApproval !== 'Approved') {
+    throw new Error('Pharmacist approval must be completed before admin approval');
+  }
+  if (request.doctorApproval !== 'Approved') {
+    throw new Error('Doctor approval must be completed before admin approval');
+  }
   if (request.providerApproval !== 'Approved') {
-    request.providerApproval = 'Approved';
-    request.history = request.history || [];
-    request.history.push({
-      id: `history-${request.id}-${(request.history?.length || 0) + 1}`,
-      status: 'ProviderAutoApproved',
-      note: `Provider approval auto-recorded for admin review`,
-      timestamp: new Date().toISOString(),
-    });
+    throw new Error('Hospital approval must be completed before admin approval');
   }
 
   request.status = 'Approved';
@@ -318,6 +513,7 @@ function addStaffEntry({ hospitalId, role, status, count }) {
     }, ...notifications];
   }
   data.setState(state);
+  data.persistStaffEntry(entry);
   return entry;
 }
 
@@ -358,7 +554,7 @@ function createPatientSupportRequest({ hospitalId, providerHospitalId, patientTy
 }
 
 function getAdminSummary() {
-  const hospitals = data.getHospitals();
+  const hospitals = data.getHospitals().filter((hospital) => hospital.role === 'Hospital');
   const inventory = data.getInventory();
   const requests = data.getRequests();
   const notifications = data.getNotifications();
@@ -369,8 +565,10 @@ function getAdminSummary() {
     totalTransactions: requests.filter((request) => ['Pending', 'Approved', 'Open'].includes(request.status)).length,
     pendingRequests: requests.filter((request) => request.status === 'Pending').length,
     approvedRequests: requests.filter((request) => request.status === 'Approved').length,
-    pendingProviderApprovals: requests.filter((request) => request.providerApproval === 'Pending' && request.status === 'Pending').length,
-    pendingAdminApprovals: requests.filter((request) => request.providerApproval === 'Approved' && request.status === 'Pending').length,
+    pendingPharmacistApprovals: requests.filter((request) => request.pharmacistApproval === 'Pending' && request.status === 'Pending').length,
+    pendingDoctorApprovals: requests.filter((request) => request.pharmacistApproval === 'Approved' && request.doctorApproval === 'Pending' && request.status === 'Pending').length,
+    pendingProviderApprovals: requests.filter((request) => request.pharmacistApproval === 'Approved' && request.doctorApproval === 'Approved' && request.providerApproval === 'Pending' && request.status === 'Pending').length,
+    pendingAdminApprovals: requests.filter((request) => request.providerApproval === 'Approved' && request.pharmacistApproval === 'Approved' && request.doctorApproval === 'Approved' && request.status === 'Pending').length,
     pendingHospitalApprovals: hospitals.filter((hospital) => hospital.accountStatus === 'Pending').length,
     latestNotifications: notifications.slice(0, 5),
   };
@@ -388,7 +586,7 @@ function deleteHospitalAccount(hospitalId) {
     throw new Error('Hospital not found');
   }
 
-  const nextHospitals = hospitals.filter((hospital) => hospital.id !== hospitalId);
+  const nextHospitals = hospitals.filter((hospital) => hospital.id !== hospitalId && hospital.hospitalId !== hospitalId);
   const nextInventory = inventory.filter((item) => item.hospitalId !== hospitalId);
   const nextStaff = staff.filter((entry) => entry.hospitalId !== hospitalId);
   const nextRequests = requests.filter((request) => request.requesterHospitalId !== hospitalId && request.providerHospitalId !== hospitalId && request.hospitalId !== hospitalId);
@@ -417,6 +615,7 @@ module.exports = {
   addResourceListing,
   createResourceRequest,
   respondToRequest,
+  reviewRequestClinicalStage,
   approveRequest,
   addStaffEntry,
   createPatientSupportRequest,

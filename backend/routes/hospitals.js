@@ -1,23 +1,34 @@
 const express = require('express');
 const data = require('../data');
-const { registerHospital, deleteHospitalAccount, addResourceListing, addStaffEntry } = require('../utils/hospitalService');
-const { authMiddleware, requireAdmin, denyAdmin } = require('../utils/auth');
+const { registerHospital, deleteHospitalAccount, addResourceListing, addStaffEntry, updateHospitalEmergencyStatus } = require('../utils/hospitalService');
+const { authMiddleware, requireAdmin, denyAdmin, hashPassword } = require('../utils/auth');
 
 const router = express.Router();
 
 const getActiveHospitals = () => data.getHospitals().filter((hospital) => hospital.accountStatus === 'Active');
 const getHospitalById = (hospitalId) => data.getHospitals().find((hospital) => hospital.id === hospitalId);
+const isReviewer = (account) => account && ['Doctor', 'Pharmacist'].includes(account.role);
+const publicReviewer = (account) => ({
+  id: account.id,
+  hospitalId: account.hospitalId,
+  name: account.name,
+  email: account.email,
+  role: account.role,
+  accountStatus: account.accountStatus,
+  location: account.location,
+});
+const publicHospital = ({ password, ...hospital }) => hospital;
 
 // GET /api/hospitals
 router.get('/', async (req, res) => {
   try {
     await data.initializeState();
     const search = (req.query.search || '').toLowerCase();
-    const hospitals = data.getHospitals().filter((hospital) => {
+    const hospitals = data.getHospitals().filter((hospital) => hospital.role === 'Hospital').filter((hospital) => {
       if (!search) return true;
       return [hospital.name, hospital.location, hospital.type, hospital.visibility].some((value) => value.toLowerCase().includes(search));
     });
-    res.json(hospitals);
+    res.json(hospitals.map(publicHospital));
   } catch (error) {
     res.status(500).json({ error: 'Unable to load hospitals' });
   }
@@ -27,9 +38,84 @@ router.get('/', async (req, res) => {
 router.get('/pending', authMiddleware, requireAdmin, async (req, res) => {
   try {
     await data.initializeState();
-    res.json(data.getHospitals().filter((hospital) => hospital.accountStatus === 'Pending'));
+    res.json(data.getHospitals().filter((hospital) => hospital.role === 'Hospital' && hospital.accountStatus === 'Pending').map(publicHospital));
   } catch (error) {
     res.status(500).json({ error: 'Unable to load pending hospitals' });
+  }
+});
+
+// GET /api/hospitals/reviewers
+router.get('/reviewers', authMiddleware, async (req, res) => {
+  await data.initializeState();
+  if (!['Hospital', 'Admin'].includes(req.auth.role)) {
+    return res.status(403).json({ error: 'Hospital or admin access required' });
+  }
+
+  const hospitalId = req.auth.hospitalId || req.auth.id;
+  const reviewers = data.getHospitals()
+    .filter((account) => isReviewer(account) && (req.auth.role === 'Admin' || account.hospitalId === hospitalId))
+    .map((account) => ({
+      ...publicReviewer(account),
+      hospitalName: data.getHospitals().find((hospital) => hospital.id === account.hospitalId)?.name || account.hospitalId,
+    }));
+  return res.json(reviewers);
+});
+
+// PATCH /api/hospitals/reviewers/:reviewerId
+router.patch('/reviewers/:reviewerId', authMiddleware, async (req, res) => {
+  try {
+    await data.initializeState();
+    if (!['Hospital', 'Admin'].includes(req.auth.role)) {
+      return res.status(403).json({ error: 'Hospital or admin access required' });
+    }
+
+    const reviewer = data.getHospitals().find((account) => account.id === req.params.reviewerId);
+    if (!isReviewer(reviewer)) {
+      return res.status(404).json({ error: 'Reviewer account not found' });
+    }
+
+    const hospitalId = req.auth.hospitalId || req.auth.id;
+    if (req.auth.role === 'Hospital' && reviewer.hospitalId !== hospitalId) {
+      return res.status(403).json({ error: 'You cannot manage another hospital reviewer' });
+    }
+
+    const { email, newPassword, accountStatus } = req.body;
+    if (email != null && req.auth.role !== 'Hospital') {
+      return res.status(403).json({ error: 'Only the assigned hospital can change reviewer email addresses' });
+    }
+    if (email != null) {
+      const normalizedEmail = String(email).trim().toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+        return res.status(400).json({ error: 'A valid reviewer email is required' });
+      }
+      const duplicate = data.getHospitals().some((account) => account.id !== reviewer.id && account.email.toLowerCase() === normalizedEmail);
+      if (duplicate) return res.status(409).json({ error: 'Email is already in use' });
+      reviewer.email = normalizedEmail;
+    }
+    if (newPassword != null) {
+      if (String(newPassword).length < 8) {
+        return res.status(400).json({ error: 'New password must be at least 8 characters' });
+      }
+      reviewer.password = hashPassword(String(newPassword));
+    }
+    if (accountStatus != null) {
+      if (!['Active', 'Suspended'].includes(accountStatus)) {
+        return res.status(400).json({ error: 'Reviewer status must be Active or Suspended' });
+      }
+      const parentHospital = getHospitalById(reviewer.hospitalId);
+      if (accountStatus === 'Active' && parentHospital?.accountStatus !== 'Active') {
+        return res.status(400).json({ error: 'Reviewer cannot be activated until the hospital is active' });
+      }
+      reviewer.accountStatus = accountStatus;
+    }
+
+    await data.persistHospitalAccount(reviewer);
+    return res.json({ reviewer: publicReviewer(reviewer) });
+  } catch (error) {
+    if (String(error.message).includes('UNIQUE constraint')) {
+      return res.status(409).json({ error: 'Email is already in use' });
+    }
+    return res.status(500).json({ error: 'Unable to update reviewer account' });
   }
 });
 
@@ -91,6 +177,11 @@ router.post('/:hospitalId/approve', authMiddleware, requireAdmin, async (req, re
 
     hospital.accountStatus = 'Active';
     hospital.approvedAt = new Date().toISOString();
+    const reviewerAccounts = hospitals.filter((entry) => entry.hospitalId === hospital.id && ['Doctor', 'Pharmacist'].includes(entry.role));
+    reviewerAccounts.forEach((reviewer) => {
+      reviewer.accountStatus = 'Active';
+      reviewer.approvedAt = hospital.approvedAt;
+    });
 
     const state = data.getState();
     state.hospitals = hospitals;
@@ -98,11 +189,36 @@ router.post('/:hospitalId/approve', authMiddleware, requireAdmin, async (req, re
     data.setState(state);
 
     // Persist status change to SQLite
-    data.persistHospitalStatus(hospital.id, 'Active');
+    await Promise.all([
+      data.persistHospitalStatus(hospital.id, 'Active'),
+      ...reviewerAccounts.map((reviewer) => data.persistHospitalStatus(reviewer.id, 'Active')),
+    ]);
 
-    res.json(hospital);
+    res.json(publicHospital(hospital));
   } catch (error) {
     res.status(500).json({ error: 'Unable to approve hospital' });
+  }
+});
+
+// PATCH /api/hospitals/:hospitalId/emergency-status
+router.patch('/:hospitalId/emergency-status', authMiddleware, requireAdmin, async (req, res) => {
+  try {
+    await data.initializeState();
+    const { emergencyStatus } = req.body;
+    const hospital = getHospitalById(req.params.hospitalId);
+
+    if (!hospital) {
+      return res.status(404).json({ error: 'Hospital not found' });
+    }
+
+    if (!['Low', 'Medium', 'High'].includes(emergencyStatus)) {
+      return res.status(400).json({ error: 'Invalid emergency status' });
+    }
+
+    const updatedHospital = updateHospitalEmergencyStatus(req.params.hospitalId, emergencyStatus);
+    res.json(publicHospital(updatedHospital));
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Unable to update emergency status' });
   }
 });
 
@@ -111,7 +227,8 @@ router.delete('/:hospitalId', authMiddleware, requireAdmin, async (req, res) => 
   try {
     await data.initializeState();
     const result = deleteHospitalAccount(req.params.hospitalId);
-    res.json({ success: true, deletedHospital: result.deletedHospital });
+    await data.persistHospitalDeletion(req.params.hospitalId);
+    res.json({ success: true, deletedHospital: publicHospital(result.deletedHospital) });
   } catch (error) {
     res.status(404).json({ error: error.message });
   }

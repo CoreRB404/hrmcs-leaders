@@ -95,14 +95,23 @@ function ResourceActions({
               <input id="request-quantity" type="number" value={requestForm.quantity} onChange={(e) => setRequestForm({ ...requestForm, quantity: Number(e.target.value) })} placeholder="Quantity" required />
             </div>
             <div className="field">
-              <label htmlFor="request-provider">Provider hospital</label>
-              <select id="request-provider" value={requestForm.providerHospitalId} onChange={(e) => setRequestForm({ ...requestForm, providerHospitalId: e.target.value })}>
-                <option value="">Choose provider</option>
-                {activeProviders.map((hospital) => (
-                  <option key={hospital.id} value={hospital.id}>{hospital.name} ({hospital.location})</option>
-                ))}
+              <label htmlFor="request-urgency">Urgency</label>
+              <select id="request-urgency" value={requestForm.urgency || 'High'} onChange={(e) => setRequestForm({ ...requestForm, urgency: e.target.value })}>
+                <option value="Low">Low</option>
+                <option value="Medium">Medium</option>
+                <option value="High">High</option>
+                <option value="Critical">Critical</option>
               </select>
             </div>
+          </div>
+          <div className="field">
+            <label htmlFor="request-provider">Provider hospital</label>
+            <select id="request-provider" value={requestForm.providerHospitalId} onChange={(e) => setRequestForm({ ...requestForm, providerHospitalId: e.target.value })}>
+              <option value="">Choose provider</option>
+              {activeProviders.map((hospital) => (
+                <option key={hospital.id} value={hospital.id}>{hospital.name} ({hospital.location})</option>
+              ))}
+            </select>
           </div>
           <div className="field">
             <label htmlFor="request-notes">Notes</label>

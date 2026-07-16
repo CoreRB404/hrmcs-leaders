@@ -11,7 +11,7 @@ function DashboardSummary({ currentHospital, isHospitalRole, isAdmin, activeAdmi
         <div>
           <span className="eyebrow">{isHospitalRole ? '● Hospital operations workspace' : '● Connected hospital network'}</span>
           <h1>{isHospitalRole && currentHospital ? `${currentHospital.name} Operations Center` : 'Hospital Resource Management & Coordination System'}</h1>
-          <p>{isHospitalRole ? 'Coordinate inventory, staff availability, and inter-hospital requests from a secure, professional workspace.' : 'Publish supplies and staff availability, request critical resources across the network, and monitor every transfer from one secure command center.'}</p>
+          <p>{isHospitalRole ? 'Coordinate inventory and inter-hospital supply requests from a secure, professional workspace.' : 'Publish supply availability, request critical resources across the network, and monitor every transfer from one secure command center.'}</p>
         </div>
       </section>
 

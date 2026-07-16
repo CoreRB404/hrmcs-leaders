@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import './styles.css';
 import Card from './components/Card';
 import Sidebar from './components/Sidebar';
@@ -17,12 +18,21 @@ import RequestFiltersPanel from './components/RequestFiltersPanel';
 import ResourceRequestList from './components/ResourceRequestList';
 import AdminOversightPanel from './components/AdminOversightPanel';
 import AdminQuickActionsPanel from './components/AdminQuickActionsPanel';
+import ManageAccountsPanel from './components/ManageAccountsPanel';
 import CriticalShortagesPanel from './components/CriticalShortagesPanel';
 import AiRecommendationsPanel from './components/AiRecommendationsPanel';
 import Toast from './components/Toast';
 
 function App() {
-  const [dashboard, setDashboard] = useState(null);
+  const defaultDashboard = {
+    totalHospitals: 0,
+    totalInventoryItems: 0,
+    criticalShortages: [],
+    availableStaffCount: 0,
+    pendingRequests: 0,
+    emergencyAlerts: 0,
+  };
+  const [dashboard, setDashboard] = useState(defaultDashboard);
   const [adminSummary, setAdminSummary] = useState(null);
   const [hospitals, setHospitals] = useState([]);
   const [hospitalSearch, setHospitalSearch] = useState('');
@@ -31,6 +41,8 @@ function App() {
   const [requestStatusFilter, setRequestStatusFilter] = useState('All');
   const [requestTypeFilter, setRequestTypeFilter] = useState('All');
   const [recommendations, setRecommendations] = useState([]);
+  const [recommendationsLoading, setRecommendationsLoading] = useState(false);
+  const [recommendationsError, setRecommendationsError] = useState('');
   const [networkInventory, setNetworkInventory] = useState([]);
   const [networkStaff, setNetworkStaff] = useState([]);
   const [networkSearch, setNetworkSearch] = useState('');
@@ -42,13 +54,21 @@ function App() {
   const [selectedProviderId, setSelectedProviderId] = useState('');
   const [hospitalDashboard, setHospitalDashboard] = useState(null);
   const [token, setToken] = useState(() => localStorage.getItem('hrmcs-token') || '');
-  const [currentHospital, setCurrentHospital] = useState(() => JSON.parse(localStorage.getItem('hrmcs-hospital') || 'null'));
+  const [currentHospital, setCurrentHospital] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('hrmcs-hospital') || 'null');
+    } catch (error) {
+      return null;
+    }
+  });
   const [loginForm, setLoginForm] = useState({ email: 'admin@hrmcs.org', password: 'Admin@1234' });
   const [listingForm, setListingForm] = useState({ resourceType: 'Supply', resourceName: '', quantity: 10, availableForBorrow: true, availableForOrder: true });
-  const [requestForm, setRequestForm] = useState({ providerHospitalId: '', resourceName: '', quantity: 5, requestType: 'Borrow', notes: '' });
+  const [requestForm, setRequestForm] = useState({ providerHospitalId: '', resourceName: '', quantity: 5, requestType: 'Borrow', urgency: 'High', notes: '' });
   const [supportForm, setSupportForm] = useState({ patientType: 'ICU', need: '', priority: 'High', notes: '' });
   const [pendingHospitals, setPendingHospitals] = useState([]);
-  const [registerForm, setRegisterForm] = useState({ name: '', location: '', email: '', password: '', visibility: 'Public', type: 'General' });
+  const [reviewerAccounts, setReviewerAccounts] = useState([]);
+  const [registerForm, setRegisterForm] = useState({ name: '', location: '', email: '', password: '', visibility: 'Public', type: 'General', emergencyStatus: 'Medium' });
+  const [generatedReviewerCredentials, setGeneratedReviewerCredentials] = useState(null);
   const [staffForm, setStaffForm] = useState({ role: 'Nurse', status: 'Available', count: 5 });
   const [feedback, setFeedback] = useState({ type: '', message: '' });
   const [adminRequestStatusFilter, setAdminRequestStatusFilter] = useState('All');
@@ -62,21 +82,133 @@ function App() {
     return stored?.role === 'Admin' ? 'system-dashboard' : (stored ? 'hospital-dashboard' : 'system-dashboard');
   });
 
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  const sectionToPath = {
+    'system-dashboard': '/system-dashboard',
+    'hospital-directory': '/hospital-directory',
+    'network-availability': '/network-availability',
+    'admin-oversight': '/admin-oversight',
+    'admin-manage-accounts': '/admin-manage-accounts',
+    'ai-recommendations': '/ai-recommendations',
+    'admin-quick-actions': '/admin-quick-actions',
+    'access-account': '/access-account',
+    'hospital-dashboard': '/hospital-dashboard',
+    'resource-actions': '/resource-actions',
+    'patient-support': '/patient-support',
+  };
+
+  const pathToSection = Object.keys(sectionToPath).reduce((acc, sectionId) => {
+    acc[sectionToPath[sectionId]] = sectionId;
+    return acc;
+  }, {});
+
+  const getDefaultSection = () => {
+    if (currentHospital?.role === 'Admin') return 'system-dashboard';
+    if (isHospitalRole || isReviewerRole) return 'hospital-dashboard';
+    return 'network-availability';
+  };
+
+  const handleSectionChange = (sectionId) => {
+    if (!sectionId) return;
+    setActiveAdminSection(sectionId);
+    const targetPath = sectionToPath[sectionId] || '/';
+    if (location.pathname !== targetPath) {
+      navigate(targetPath, { replace: true });
+    }
+  };
+
   useEffect(() => {
+    const normalizedPath = location.pathname.replace(/\/$/, '') || '/';
+    const sectionId = pathToSection[normalizedPath];
+
+    if (!currentHospital) {
+      if (normalizedPath !== '/login') {
+        setActiveAdminSection('access-account');
+        navigate('/login', { replace: true });
+      }
+      return;
+    }
+
+    if (sectionId) {
+      if (sectionId !== activeAdminSection) {
+        setActiveAdminSection(sectionId);
+      }
+    } else {
+      const defaultSection = getDefaultSection();
+      navigate(sectionToPath[defaultSection] || '/system-dashboard', { replace: true });
+    }
+  }, [location.pathname, currentHospital, activeAdminSection, navigate]);
+
+  useEffect(() => {
+    if (!currentHospital || location.pathname === '/login') return;
     if (activeAdminSection) {
       localStorage.setItem('hrmcs-active-section', activeAdminSection);
     }
-  }, [activeAdminSection]);
+  }, [activeAdminSection, currentHospital, location.pathname]);
+
+  useEffect(() => {
+    const hasToken = Boolean(token);
+    const hasHospital = Boolean(currentHospital && currentHospital.id);
+    if (!hasToken || !hasHospital) {
+      localStorage.removeItem('hrmcs-token');
+      localStorage.removeItem('hrmcs-hospital');
+      localStorage.removeItem('hrmcs-active-section');
+      localStorage.removeItem('hrmcs-parent-session');
+      if (token || currentHospital) {
+        setToken('');
+        setCurrentHospital(null);
+      }
+    }
+  }, [token, currentHospital]);
+
+  const clearSession = (showMessage = true) => {
+    localStorage.removeItem('hrmcs-token');
+    localStorage.removeItem('hrmcs-hospital');
+    localStorage.removeItem('hrmcs-active-section');
+    localStorage.removeItem('hrmcs-parent-session');
+    setToken('');
+    setCurrentHospital(null);
+    setActiveAdminSection('access-account');
+    setDashboard(defaultDashboard);
+    if (showMessage && location.pathname !== '/login') {
+      setFeedback({ type: 'error', message: 'Session expired or invalid. Please sign in again.' });
+    }
+    navigate('/login', { replace: true });
+  };
 
   const authFetch = async (url, options = {}) => {
-    const headers = { ...(options.headers || {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) };
-    return fetch(url, { ...options, headers });
+    const { preserveSessionOn401 = false, ...fetchOptions } = options;
+    const headers = { ...(fetchOptions.headers || {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+    const response = await fetch(url, { ...fetchOptions, headers });
+    if (response.status === 401 && !preserveSessionOn401) {
+      clearSession(false);
+    }
+    return response;
   };
+
+  useEffect(() => {
+    if (!token || !currentHospital || location.pathname === '/login') return;
+
+    const verifySession = async () => {
+      try {
+        const response = await authFetch('/api/dashboard');
+        if (response.status === 401) {
+          clearSession(false);
+        }
+      } catch (error) {
+        clearSession(false);
+      }
+    };
+
+    verifySession();
+  }, [token, currentHospital, location.pathname]);
 
   const getHospitalName = (hospitalId) => hospitals.find((hospital) => hospital.id === hospitalId)?.name || hospitalId;
 
   const selectedNetworkItem = [...networkInventory, ...networkStaff].find((item) => item.id === selectedSupplyId);
-  const activeProviders = hospitals.filter((hospital) => hospital.id !== currentHospital?.id && hospital.accountStatus === 'Active' && hospital.role !== 'Admin');
+  const activeProviders = hospitals.filter((hospital) => hospital.id !== currentHospital?.id && hospital.accountStatus === 'Active' && hospital.role === 'Hospital');
   const selectedProvider = hospitals.find((hospital) => hospital.id === requestForm.providerHospitalId);
   const isRequestSubmitDisabled = !requestForm.providerHospitalId || !requestForm.resourceName || requestForm.quantity <= 0;
   const filteredRequests = requests
@@ -88,7 +220,10 @@ function App() {
       if (!requestTypeFilter || requestTypeFilter === 'All') return true;
       return (request.requestType || request.type) === requestTypeFilter;
     });
-  const pendingProviderRequests = requests.filter((request) => request.providerApproval === 'Pending');
+  const pendingProviderRequests = requests.filter((request) => request.status === 'Pending'
+    && request.pharmacistApproval === 'Approved'
+    && request.doctorApproval === 'Approved'
+    && request.providerApproval === 'Pending');
   const adminVisibleRequests = requests.filter((request) => {
     if (!adminRequestStatusFilter || adminRequestStatusFilter === 'All') return true;
     return request.status === adminRequestStatusFilter;
@@ -105,31 +240,32 @@ function App() {
   };
 
   const isAdmin = currentHospital?.role === 'Admin';
+  const isReviewerRole = ['Doctor', 'Pharmacist'].includes(currentHospital?.role);
   const isHospitalAccount = Boolean(currentHospital);
-  const isHospitalRole = Boolean(currentHospital && currentHospital.role !== 'Admin');
+  const isHospitalRole = Boolean(currentHospital && currentHospital.role === 'Hospital');
   const showFocusedSection = (sectionId) => !isHospitalAccount || activeAdminSection === sectionId;
   const hospitalWorkspaceStats = isHospitalRole ? [
     { label: 'Inventory items', value: hospitalDashboard?.hospitalInventory?.length ?? 0, tone: 'primary' },
     { label: 'Open requests', value: hospitalDashboard?.hospitalRequests?.filter((request) => request.status === 'Pending' || request.providerApproval === 'Pending').length ?? 0, tone: 'accent' },
-    { label: 'Staff available', value: hospitalDashboard?.hospitalStaff?.filter((staff) => (staff.availableCount ?? staff.count) > 0).length ?? 0, tone: 'success' },
     { label: 'At-risk items', value: hospitalDashboard?.hospitalInventory?.filter((item) => (item.availableQuantity ?? item.quantity) <= 5).length ?? 0, tone: 'warning' },
   ] : [];
   const sidebarSections = isAdmin
     ? [
         { id: 'system-dashboard', label: 'System dashboard', hint: 'Overview', icon: '◫' },
         { id: 'hospital-directory', label: 'Hospital directory', hint: 'Directory', icon: '◉' },
-        { id: 'network-availability', label: 'Network availability', hint: 'Supplies & staff', icon: '⬢' },
+        { id: 'network-availability', label: 'Network availability', hint: 'Supply view', icon: '⬢' },
         { id: 'admin-oversight', label: 'Admin oversight', hint: 'Operations', icon: '▣' },
+        { id: 'admin-manage-accounts', label: 'Manage accounts', hint: 'Hospital access control', icon: '✎' },
         { id: 'ai-recommendations', label: 'AI recommendations', hint: 'Smart suggestions', icon: '◌' },
         { id: 'admin-quick-actions', label: 'Admin quick actions', hint: 'Fast tasks', icon: '⚙' },
-        { id: 'access-account', label: 'Access hospital account', hint: 'Login', icon: '⟡' },
       ]
     : [
-        { id: 'network-availability', label: 'Network availability', hint: 'Supplies & staff', icon: '⬢' },
-        { id: 'hospital-dashboard', label: 'My dashboard', hint: 'Capacity view', icon: '◫' },
+        ...((isHospitalRole || isReviewerRole) ? [{ id: 'hospital-dashboard', label: 'My dashboard', hint: 'Inventory & requests', icon: '◫' }] : []),
+        { id: 'network-availability', label: 'Network availability', hint: 'Supply view', icon: '⬢' },
         { id: 'resource-actions', label: 'Resource actions', hint: 'Listings & requests', icon: '⤴' },
         { id: 'patient-support', label: 'Patient support', hint: 'Coordination', icon: '✚' },
-        { id: 'access-account', label: 'Access account', hint: 'Login', icon: '⟡' },
+        { id: 'ai-recommendations', label: 'AI recommendations', hint: 'Smart suggestions', icon: '◌' },
+        ...(isHospitalRole ? [{ id: 'access-account', label: 'Reviewer access', hint: 'Doctor / Pharmacist', icon: '⟡' }] : []),
       ];
 
   const selectSupply = (item) => {
@@ -158,8 +294,9 @@ function App() {
   };
 
   const filterNetworkInventory = () => {
+    const currentHospitalId = currentHospital?.id;
     return networkInventory
-      .filter((item) => item.hospitalId !== currentHospital.id)
+      .filter((item) => !currentHospitalId || item.hospitalId !== currentHospitalId)
       .filter((item) => {
         const query = networkSearch.toLowerCase();
         const provider = hospitals.find((hospital) => hospital.id === item.hospitalId);
@@ -183,13 +320,16 @@ function App() {
         if (inventorySort === 'name') {
           return a.resourceName.localeCompare(b.resourceName);
         }
-        return b.quantity - a.quantity;
+        const aQuantity = a.publishedQuantity ?? a.availableQuantity ?? a.quantity;
+        const bQuantity = b.publishedQuantity ?? b.availableQuantity ?? b.quantity;
+        return bQuantity - aQuantity;
       });
   };
 
   const filterNetworkStaff = () => {
+    const currentHospitalId = currentHospital?.id;
     return networkStaff
-      .filter((item) => item.hospitalId !== currentHospital.id)
+      .filter((item) => !currentHospitalId || item.hospitalId !== currentHospitalId)
       .filter((item) => {
         const query = networkSearch.toLowerCase();
         const provider = hospitals.find((hospital) => hospital.id === item.hospitalId);
@@ -210,21 +350,82 @@ function App() {
         if (staffSort === 'role') {
           return a.role.localeCompare(b.role);
         }
-        return b.count - a.count;
+        const aCount = a.publishedCount ?? a.availableCount ?? a.count;
+        const bCount = b.publishedCount ?? b.availableCount ?? b.count;
+        return bCount - aCount;
       });
+  };
+
+  const buildFallbackRecommendations = (resourceName, quantity, inventoryItems, staffItems) => {
+    const normalizedResource = (resourceName || '').trim().toLowerCase();
+    const relevantItems = inventoryItems.filter((item) => {
+      if (!normalizedResource) return true;
+      return (item.resourceName || '').toLowerCase().includes(normalizedResource);
+    });
+
+    const providers = hospitals.filter((hospital) => hospital.accountStatus === 'Active' && hospital.role === 'Hospital' && hospital.id !== currentHospital?.id);
+
+    return providers
+      .map((hospital) => {
+        const inventoryItem = relevantItems.find((item) => item.hospitalId === hospital.id);
+        const staffForHospital = staffItems.filter((member) => member.hospitalId === hospital.id && (member.status === 'Available' || member.status === 'Deployable'));
+        const stock = inventoryItem
+          ? (inventoryItem.publishedQuantity ?? inventoryItem.availableQuantity ?? inventoryItem.quantity ?? 0)
+          : 0;
+        const availableStaff = staffForHospital.reduce((total, member) => total + (member.availableCount ?? member.publishedCount ?? member.count ?? 0), 0);
+
+        if (!inventoryItem && availableStaff <= 0) {
+          return null;
+        }
+
+        const normalizedStock = Number(stock || 0);
+        const stockScore = normalizedStock <= 0 ? 0 : Math.min(5, Math.max(1, Math.round(normalizedStock / 10)));
+        const staffScore = Math.min(5, Math.max(1, availableStaff || 0));
+        const emergencyScore = hospital.emergencyStatus === 'High' ? 5 : hospital.emergencyStatus === 'Medium' ? 3 : 2;
+        const score = Number(Math.min(5, Math.max(0, (stockScore * 0.7) + (staffScore * 0.2) + (emergencyScore * 0.1))).toFixed(2));
+
+        return {
+          id: `${hospital.id}-${inventoryItem?.id || 'fallback'}`,
+          name: hospital.name,
+          resourceName: inventoryItem?.resourceName || resourceName || 'Resource',
+          stock: normalizedStock,
+          availableStaff,
+          score,
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, Math.max(3, Number(quantity) || 5));
   };
 
   const loadData = async () => {
     try {
-      const [dashboardRes, requestsRes, hospitalsRes, notificationsRes, recommendationsRes, inventoryRes, staffRes] = await Promise.all([
+      const inventoryRes = await fetch('/api/inventory');
+      const inventoryData = inventoryRes.ok ? await inventoryRes.json() : [];
+      const recommendationResource = requestForm.resourceName || '';
+      const recommendationQuantity = Number(requestForm.quantity) || 10;
+      const recommendationUrgency = requestForm.urgency || 'High';
+      const recommendationRequest = authFetch(
+        `/api/recommendations${recommendationResource ? `/${encodeURIComponent(recommendationResource)}` : ''}?currentHospitalId=${encodeURIComponent(currentHospital?.id || '')}&quantity=${recommendationQuantity}&urgency=${encodeURIComponent(recommendationUrgency)}`
+      );
+
+      const [dashboardRes, requestsRes, hospitalsRes, notificationsRes, recommendationsRes, staffRes] = await Promise.all([
         authFetch('/api/dashboard'),
         authFetch('/api/requests'),
         authFetch(`/api/hospitals?search=${encodeURIComponent(hospitalSearch)}`),
         authFetch('/api/notifications'),
-        authFetch('/api/recommendations/Blood%20Bags'),
-        fetch('/api/inventory'),
+        recommendationRequest,
         fetch('/api/staff'),
       ]);
+
+      const inventoryPayload = inventoryRes.ok
+        ? inventoryData.map((item) => ({
+            ...item,
+            publishedQuantity: item.publishedQuantity ?? item.availableQuantity ?? item.quantity ?? 0,
+            availableQuantity: item.availableQuantity ?? item.publishedQuantity ?? item.quantity ?? 0,
+            quantity: item.quantity ?? item.publishedQuantity ?? item.availableQuantity ?? 0,
+          }))
+        : [];
 
       if (dashboardRes.ok) {
         setDashboard(await dashboardRes.json());
@@ -242,23 +443,46 @@ function App() {
         setNotifications(await notificationsRes.json());
       }
 
-      if (recommendationsRes.ok) {
-        setRecommendations(await recommendationsRes.json());
-      }
-
       if (inventoryRes.ok) {
-        setNetworkInventory(await inventoryRes.json());
+        setNetworkInventory(inventoryPayload);
       }
 
+      const staffData = staffRes.ok
+        ? (await staffRes.json()).map((item) => ({
+            ...item,
+            publishedCount: item.publishedCount ?? item.availableCount ?? item.count ?? 0,
+            availableCount: item.availableCount ?? item.publishedCount ?? item.count ?? 0,
+            count: item.count ?? item.publishedCount ?? item.availableCount ?? 0,
+          }))
+        : [];
       if (staffRes.ok) {
-        setNetworkStaff(await staffRes.json());
+        setNetworkStaff(staffData);
       }
+
+      setRecommendationsLoading(true);
+      if (recommendationsRes.ok) {
+        const serverRecommendations = await recommendationsRes.json();
+        setRecommendations(serverRecommendations?.length ? serverRecommendations : []);
+        setRecommendationsError('');
+      } else {
+        setRecommendations([]);
+        setRecommendationsError('Unable to load AI recommendations right now.');
+      }
+      setRecommendationsLoading(false);
 
       if (token && currentHospital) {
-        const hospitalRes = await authFetch(`/api/hospital-dashboard/${currentHospital.id}`);
+        const workspaceHospitalId = currentHospital.hospitalId || currentHospital.id;
+        const hospitalRes = await authFetch(`/api/hospital-dashboard/${workspaceHospitalId}`);
         if (hospitalRes.ok) {
           setHospitalDashboard(await hospitalRes.json());
         }
+      }
+
+      if (token && ['Hospital', 'Admin'].includes(currentHospital?.role)) {
+        const reviewersRes = await authFetch('/api/hospitals/reviewers');
+        setReviewerAccounts(reviewersRes.ok ? await reviewersRes.json() : []);
+      } else {
+        setReviewerAccounts([]);
       }
 
       if (token && currentHospital?.role === 'Admin') {
@@ -282,8 +506,9 @@ function App() {
 
 
   useEffect(() => {
+    if (!token || !currentHospital) return;
     loadData();
-  }, [token, currentHospital, hospitalSearch]);
+  }, [token, currentHospital, hospitalSearch, requestForm.resourceName, requestForm.quantity, requestForm.urgency]);
 
   const approve = async (id) => {
     const response = await authFetch(`/api/requests/${id}/approve`, { method: 'POST' });
@@ -307,29 +532,126 @@ function App() {
 
     const result = await response.json();
     if (response.ok) {
+      localStorage.removeItem('hrmcs-parent-session');
       setToken(result.token);
       setCurrentHospital(result.hospital);
       localStorage.setItem('hrmcs-token', result.token);
       localStorage.setItem('hrmcs-hospital', JSON.stringify(result.hospital));
-      const defaultSection = result.hospital.role === 'Admin' ? 'system-dashboard' : 'hospital-dashboard';
+      const defaultSection = result.hospital.role === 'Admin'
+        ? 'system-dashboard'
+        : ['Doctor', 'Pharmacist'].includes(result.hospital.role)
+          ? 'hospital-dashboard'
+          : 'hospital-dashboard';
       setActiveAdminSection(defaultSection);
       localStorage.setItem('hrmcs-active-section', defaultSection);
+      navigate(sectionToPath[defaultSection] || '/');
       setFeedback({ type: 'success', message: `Welcome back, ${result.hospital.name}.` });
     } else {
       setFeedback({ type: 'error', message: result.error || 'Login failed.' });
     }
   };
 
+  const handleReviewerLogin = async (event) => {
+    event.preventDefault();
+    try {
+      const response = await authFetch('/api/auth/reviewer-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(loginForm),
+        preserveSessionOn401: true,
+      });
+      const result = await response.json().catch(() => ({
+        error: response.status === 404
+          ? 'Reviewer authentication route is unavailable. Restart the backend server.'
+          : 'The authentication server returned an invalid response.',
+      }));
+
+      if (response.ok && result.token && result.hospital) {
+        if (currentHospital?.role === 'Hospital' && token) {
+          localStorage.setItem('hrmcs-parent-session', JSON.stringify({ token, hospital: currentHospital }));
+        }
+        setToken(result.token);
+        setCurrentHospital(result.hospital);
+        localStorage.setItem('hrmcs-token', result.token);
+        localStorage.setItem('hrmcs-hospital', JSON.stringify(result.hospital));
+        setActiveAdminSection('hospital-dashboard');
+        localStorage.setItem('hrmcs-active-section', 'hospital-dashboard');
+        navigate('/hospital-dashboard');
+        setFeedback({ type: 'success', message: `${result.hospital.role} reviewer access granted.` });
+      } else {
+        setFeedback({ type: 'error', message: result.error || 'Reviewer login failed.' });
+      }
+    } catch (error) {
+      setFeedback({ type: 'error', message: 'Unable to reach the authentication server. Please try again.' });
+    }
+  };
+
+  const updateReviewerAccount = async (reviewerId, updates) => {
+    const response = await authFetch(`/api/hospitals/reviewers/${reviewerId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates),
+    });
+    const result = await response.json();
+    if (response.ok) {
+      setReviewerAccounts((accounts) => accounts.map((account) => account.id === reviewerId ? { ...account, ...result.reviewer } : account));
+      setFeedback({ type: 'success', message: `${result.reviewer.role} account updated.` });
+      return true;
+    }
+    setFeedback({ type: 'error', message: result.error || 'Reviewer account update failed.' });
+    return false;
+  };
+
+  const changeOwnPassword = async (passwords) => {
+    const response = await authFetch('/api/auth/password', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(passwords),
+      preserveSessionOn401: true,
+    });
+    const result = await response.json();
+    setFeedback({
+      type: response.ok ? 'success' : 'error',
+      message: response.ok ? 'Password changed successfully.' : result.error || 'Password change failed.',
+    });
+    return response.ok;
+  };
+
   const handleLogout = () => {
+    if (['Doctor', 'Pharmacist'].includes(currentHospital?.role)) {
+      try {
+        const parentSession = JSON.parse(localStorage.getItem('hrmcs-parent-session') || 'null');
+        const belongsToParent = parentSession?.hospital?.role === 'Hospital'
+          && parentSession.hospital.id === currentHospital.hospitalId;
+        if (parentSession?.token && belongsToParent) {
+          localStorage.setItem('hrmcs-token', parentSession.token);
+          localStorage.setItem('hrmcs-hospital', JSON.stringify(parentSession.hospital));
+          localStorage.setItem('hrmcs-active-section', 'hospital-dashboard');
+          localStorage.removeItem('hrmcs-parent-session');
+          setToken(parentSession.token);
+          setCurrentHospital(parentSession.hospital);
+          setHospitalDashboard(null);
+          setActiveAdminSection('hospital-dashboard');
+          setFeedback({ type: 'success', message: `Returned to ${parentSession.hospital.name}.` });
+          navigate('/hospital-dashboard', { replace: true });
+          return;
+        }
+      } catch (error) {
+        localStorage.removeItem('hrmcs-parent-session');
+      }
+    }
+
     localStorage.removeItem('hrmcs-token');
     localStorage.removeItem('hrmcs-hospital');
     localStorage.removeItem('hrmcs-active-section');
+    localStorage.removeItem('hrmcs-parent-session');
     setToken('');
     setCurrentHospital(null);
     setHospitalDashboard(null);
     setAdminSummary(null);
-    setActiveAdminSection('system-dashboard');
+    setActiveAdminSection('access-account');
     setFeedback({ type: 'success', message: 'Signed out successfully.' });
+    navigate('/login', { replace: true });
   };
 
   const createListing = async (event) => {
@@ -358,7 +680,7 @@ function App() {
     });
     const result = await response.json();
     if (response.ok) {
-      setRequestForm({ providerHospitalId: '', resourceName: '', quantity: 5, requestType: 'Borrow', notes: '' });
+      setRequestForm({ providerHospitalId: '', resourceName: '', quantity: 5, requestType: 'Borrow', urgency: 'High', notes: '' });
       setRecommendations(result.suggestions || []);
       setFeedback({ type: 'success', message: `Requested ${result.request.resourceName}` });
     } else {
@@ -393,6 +715,21 @@ function App() {
     const result = await response.json();
     setFeedback({ type: response.ok ? 'success' : 'error', message: response.ok ? `Request ${result.id} ${result.status.toLowerCase()}` : result.error || 'Unable to respond.' });
     loadData();
+  };
+
+  const reviewClinicalRequest = async (requestId, reviewerRole, decision) => {
+    const endpoint = reviewerRole === 'Pharmacist' ? 'pharmacist-review' : 'doctor-review';
+    const response = await authFetch(`/api/requests/${requestId}/${endpoint}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision, notes: `${decision} by ${reviewerRole.toLowerCase()}` }),
+    });
+    const result = await response.json();
+    setFeedback({
+      type: response.ok ? 'success' : 'error',
+      message: response.ok ? `${reviewerRole} ${decision} recorded for request ${requestId}.` : result.error || 'Clinical review failed.',
+    });
+    await loadData();
   };
 
   const createSupportRequest = async (event) => {
@@ -447,6 +784,21 @@ function App() {
     loadData();
   };
 
+  const updateHospitalEmergencyStatus = async (hospitalId, emergencyStatus) => {
+    const response = await authFetch(`/api/hospitals/${hospitalId}/emergency-status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ emergencyStatus }),
+    });
+    const result = await response.json();
+    if (response.ok) {
+      setHospitals((prev) => prev.map((hospital) => (hospital.id === hospitalId ? result : hospital)));
+      setFeedback({ type: 'success', message: `${result.name} emergency status set to ${result.emergencyStatus}.` });
+    } else {
+      setFeedback({ type: 'error', message: result.error || 'Failed to update emergency status.' });
+    }
+  };
+
   const registerHospital = async (event) => {
     event.preventDefault();
     const response = await authFetch('/api/hospitals/register', {
@@ -457,33 +809,43 @@ function App() {
     const result = await response.json();
     if (response.ok) {
       setFeedback({ type: 'success', message: `Hospital ${result.name} registered successfully.` });
-      setRegisterForm({ name: '', location: '', email: '', password: '', visibility: 'Public', type: 'General' });
+      setGeneratedReviewerCredentials(result.reviewerCredentials || null);
+      setRegisterForm({ name: '', location: '', email: '', password: '', visibility: 'Public', type: 'General', emergencyStatus: 'Medium' });
       loadData();
     } else {
+      setGeneratedReviewerCredentials(null);
       setFeedback({ type: 'error', message: result.error || 'Hospital registration failed.' });
     }
   };
 
-  // Landing / auth page (not logged in)
-  if (!token) {
+  // Landing / auth page (not logged in or session incomplete)
+  if (!token || !currentHospital) {
     return (
       <>
-        <LandingPage
-          loginForm={loginForm}
-          setLoginForm={setLoginForm}
-          handleLogin={handleLogin}
-          registerForm={registerForm}
-          setRegisterForm={setRegisterForm}
-          registerHospital={registerHospital}
-          feedback={feedback}
-        />
+        <Routes>
+          <Route
+            path="/login"
+            element={(
+              <LandingPage
+                loginForm={loginForm}
+                setLoginForm={setLoginForm}
+                handleLogin={handleLogin}
+                registerForm={registerForm}
+                setRegisterForm={setRegisterForm}
+                registerHospital={registerHospital}
+                generatedReviewerCredentials={generatedReviewerCredentials}
+                feedback={feedback}
+              />
+            )}
+          />
+          <Route path="*" element={<Navigate to="/login" replace />} />
+        </Routes>
         <Toast feedback={feedback} onDismiss={() => setFeedback({ type: '', message: '' })} />
       </>
     );
   }
 
-  // Loading state
-  if (!dashboard) {
+  if (token && currentHospital && !dashboard) {
     return (
       <div className={`page ${currentHospital ? 'has-sidebar' : ''}`}>
         <div className="panel" style={{ textAlign: 'center', padding: 60 }}>
@@ -500,7 +862,7 @@ function App() {
         <Sidebar
           sidebarSections={sidebarSections}
           activeAdminSection={activeAdminSection}
-          setActiveAdminSection={setActiveAdminSection}
+          setActiveAdminSection={handleSectionChange}
           currentHospital={currentHospital}
           isAdmin={isAdmin}
           handleLogout={handleLogout}
@@ -508,140 +870,201 @@ function App() {
       )}
 
       <div className="main-content">
-        {(showFocusedSection('system-dashboard') || showFocusedSection('hospital-dashboard')) && (
-          <DashboardSummary
-            currentHospital={currentHospital}
-            isHospitalRole={isHospitalRole}
-            isAdmin={isAdmin}
-            activeAdminSection={activeAdminSection}
-            hospitalWorkspaceStats={hospitalWorkspaceStats}
-            dashboard={dashboard}
+        <Routes>
+          <Route
+            path="/system-dashboard"
+            element={(
+              <>
+                <DashboardSummary
+                  currentHospital={currentHospital}
+                  isHospitalRole={isHospitalRole}
+                  isAdmin={isAdmin}
+                  activeAdminSection={activeAdminSection}
+                  hospitalWorkspaceStats={hospitalWorkspaceStats}
+                  dashboard={dashboard}
+                />
+                {isAdmin && (
+                  <div className="grid two-col" style={{ marginTop: '24px' }}>
+                    <NotificationsPanel notifications={notifications} />
+                    <CriticalShortagesPanel dashboard={dashboard} />
+                  </div>
+                )}
+              </>
+            )}
           />
-        )}
 
-        {showFocusedSection('system-dashboard') && isAdmin && (
-          <div className="grid two-col" style={{ marginTop: '24px' }}>
-            <NotificationsPanel notifications={notifications} />
-            <CriticalShortagesPanel dashboard={dashboard} />
-          </div>
-        )}
-
-        <div className="grid two-col">
-          {showFocusedSection('hospital-directory') && (
-            <HospitalDirectory hospitalSearch={hospitalSearch} setHospitalSearch={setHospitalSearch} hospitals={hospitals} getHospitalName={getHospitalName} />
-          )}
-        </div>
-
-        {showFocusedSection('network-availability') && currentHospital && (
-          <NetworkAvailability
-            hospitals={hospitals}
-            currentHospital={currentHospital}
-            networkSearch={networkSearch}
-            setNetworkSearch={setNetworkSearch}
-            networkLocationFilter={networkLocationFilter}
-            setNetworkLocationFilter={setNetworkLocationFilter}
-            networkTypeFilter={networkTypeFilter}
-            setNetworkTypeFilter={setNetworkTypeFilter}
-            inventorySort={inventorySort}
-            setInventorySort={setInventorySort}
-            staffSort={staffSort}
-            setStaffSort={setStaffSort}
-            inventoryAvailabilityFilter={inventoryAvailabilityFilter}
-            setInventoryAvailabilityFilter={setInventoryAvailabilityFilter}
-            staffStatusFilter={staffStatusFilter}
-            setStaffStatusFilter={setStaffStatusFilter}
-            filterNetworkInventory={filterNetworkInventory}
-            filterNetworkStaff={filterNetworkStaff}
-            selectSupply={selectSupply}
-            selectStaffProvider={selectStaffProvider}
-            selectedSupplyId={selectedSupplyId}
-            selectedProviderId={selectedProviderId}
-            selectedNetworkItem={selectedNetworkItem}
-            getHospitalName={getHospitalName}
+          <Route
+            path="/hospital-dashboard"
+            element={(isHospitalRole || isReviewerRole) && hospitalDashboard ? (
+              <>
+                {isReviewerRole ? (
+                  <AccessAccountPanel
+                    currentHospital={currentHospital}
+                    loginForm={loginForm}
+                    setLoginForm={setLoginForm}
+                    handleReviewerLogin={handleReviewerLogin}
+                    handleLogout={handleLogout}
+                    reviewerAccounts={reviewerAccounts}
+                    updateReviewerAccount={updateReviewerAccount}
+                    changeOwnPassword={changeOwnPassword}
+                  />
+                ) : null}
+                <HospitalDashboard
+                  hospitalDashboard={hospitalDashboard}
+                  currentHospital={currentHospital}
+                  respondToRequest={respondToRequest}
+                  reviewClinicalRequest={reviewClinicalRequest}
+                  getHospitalName={getHospitalName}
+                />
+              </>
+            ) : <Navigate to="/network-availability" replace />}
           />
-        )}
 
-        <div className="grid two-col">
-          {showFocusedSection('access-account') && (
-            <AccessAccountPanel currentHospital={currentHospital} loginForm={loginForm} setLoginForm={setLoginForm} handleLogin={handleLogin} handleLogout={handleLogout} />
-          )}
-          {showFocusedSection('resource-actions') && currentHospital && currentHospital.role !== 'Admin' && (
-            <RequestFiltersPanel requestStatusFilter={requestStatusFilter} setRequestStatusFilter={setRequestStatusFilter} requestTypeFilter={requestTypeFilter} setRequestTypeFilter={setRequestTypeFilter} />
-          )}
-        </div>
-
-        {showFocusedSection('hospital-dashboard') && currentHospital && currentHospital.role !== 'Admin' && hospitalDashboard && (
-          <HospitalDashboard hospitalDashboard={hospitalDashboard} currentHospital={currentHospital} respondToRequest={respondToRequest} />
-        )}
-
-        {showFocusedSection('resource-actions') && (
-          <ResourceActions
-            currentHospital={currentHospital}
-            listingForm={listingForm}
-            setListingForm={setListingForm}
-            createListing={createListing}
-            staffForm={staffForm}
-            setStaffForm={setStaffForm}
-            submitStaffUpdate={submitStaffUpdate}
-            requestForm={requestForm}
-            setRequestForm={setRequestForm}
-            activeProviders={activeProviders}
-            createRequest={createRequest}
-            selectedProvider={selectedProvider}
-            isRequestSubmitDisabled={isRequestSubmitDisabled}
+          <Route
+            path="/hospital-directory"
+            element={(
+              <div className="grid two-col">
+                <HospitalDirectory
+                  hospitalSearch={hospitalSearch}
+                  setHospitalSearch={setHospitalSearch}
+                  hospitals={hospitals}
+                  getHospitalName={getHospitalName}
+                  currentHospital={currentHospital}
+                  updateHospitalEmergencyStatus={updateHospitalEmergencyStatus}
+                />
+              </div>
+            )}
           />
-        )}
 
-        {showFocusedSection('patient-support') && (
-          <PatientSupportPanel
-            currentHospital={currentHospital}
-            supportForm={supportForm}
-            setSupportForm={setSupportForm}
-            createSupportRequest={createSupportRequest}
-            selectedProvider={selectedProvider}
-            clearSelectedProvider={() => { setSelectedProviderId(''); setSelectedSupplyId(null); }}
+          <Route
+            path="/network-availability"
+            element={(
+              <NetworkAvailability
+                hospitals={hospitals}
+                currentHospital={currentHospital}
+                networkSearch={networkSearch}
+                setNetworkSearch={setNetworkSearch}
+                networkLocationFilter={networkLocationFilter}
+                setNetworkLocationFilter={setNetworkLocationFilter}
+                networkTypeFilter={networkTypeFilter}
+                setNetworkTypeFilter={setNetworkTypeFilter}
+                inventorySort={inventorySort}
+                setInventorySort={setInventorySort}
+                inventoryAvailabilityFilter={inventoryAvailabilityFilter}
+                setInventoryAvailabilityFilter={setInventoryAvailabilityFilter}
+                filterNetworkInventory={filterNetworkInventory}
+                selectSupply={selectSupply}
+                selectedSupplyId={selectedSupplyId}
+                selectedProviderId={selectedProviderId}
+                selectedNetworkItem={selectedNetworkItem}
+                getHospitalName={getHospitalName}
+              />
+            )}
           />
-        )}
 
-        {currentHospital?.role === 'Admin' && showFocusedSection('admin-oversight') && (
-          <AdminOversightPanel
-            adminSummaryResolved={adminSummaryResolved}
-            pendingHospitals={pendingHospitals}
-            requests={requests}
-            hospitals={hospitals}
-            currentHospital={currentHospital}
-            adminRequestStatusFilter={adminRequestStatusFilter}
-            setAdminRequestStatusFilter={setAdminRequestStatusFilter}
-            approveHospital={approveHospital}
-            deleteHospital={deleteHospital}
-            approve={approve}
-            getHospitalName={getHospitalName}
+          <Route
+            path="/resource-actions"
+            element={(
+              <>
+                <div className="grid two-col">
+                  <RequestFiltersPanel requestStatusFilter={requestStatusFilter} setRequestStatusFilter={setRequestStatusFilter} requestTypeFilter={requestTypeFilter} setRequestTypeFilter={setRequestTypeFilter} />
+                </div>
+                <ResourceActions
+                  currentHospital={currentHospital}
+                  listingForm={listingForm}
+                  setListingForm={setListingForm}
+                  createListing={createListing}
+                  staffForm={staffForm}
+                  setStaffForm={setStaffForm}
+                  submitStaffUpdate={submitStaffUpdate}
+                  requestForm={requestForm}
+                  setRequestForm={setRequestForm}
+                  activeProviders={activeProviders}
+                  createRequest={createRequest}
+                  selectedProvider={selectedProvider}
+                  isRequestSubmitDisabled={isRequestSubmitDisabled}
+                />
+              </>
+            )}
           />
-        )}
 
-        <div className="grid two-col">
+          <Route
+            path="/patient-support"
+            element={(
+              <PatientSupportPanel
+                currentHospital={currentHospital}
+                supportForm={supportForm}
+                setSupportForm={setSupportForm}
+                createSupportRequest={createSupportRequest}
+                selectedProvider={selectedProvider}
+                clearSelectedProvider={() => { setSelectedProviderId(''); setSelectedSupplyId(null); }}
+              />
+            )}
+          />
 
-          {currentHospital?.role !== 'Admin' && (
-            <ResourceRequestList
-              currentHospital={currentHospital}
-              filteredRequests={filteredRequests}
-              timelineOpenId={timelineOpenId}
-              setTimelineOpenId={setTimelineOpenId}
-              respondToRequest={respondToRequest}
-              getHospitalName={getHospitalName}
-            />
-          )}
-        </div>
+          <Route
+            path="/admin-oversight"
+            element={currentHospital?.role === 'Admin' ? (
+              <AdminOversightPanel
+                adminSummaryResolved={adminSummaryResolved}
+                pendingHospitals={pendingHospitals}
+                requests={requests}
+                hospitals={hospitals}
+                currentHospital={currentHospital}
+                adminRequestStatusFilter={adminRequestStatusFilter}
+                setAdminRequestStatusFilter={setAdminRequestStatusFilter}
+                approveHospital={approveHospital}
+                deleteHospital={deleteHospital}
+                approve={approve}
+                getHospitalName={getHospitalName}
+              />
+            ) : <Navigate to="/system-dashboard" replace />}
+          />
 
-        <div className="grid two-col">
-          {showFocusedSection('ai-recommendations') && (
-            <AiRecommendationsPanel recommendations={recommendations} />
-          )}
+          <Route
+            path="/admin-manage-accounts"
+            element={currentHospital?.role === 'Admin' ? (
+              <ManageAccountsPanel
+                hospitals={hospitals}
+                currentHospital={currentHospital}
+                deleteHospital={deleteHospital}
+                reviewerAccounts={reviewerAccounts}
+                updateReviewerAccount={updateReviewerAccount}
+              />
+            ) : <Navigate to="/system-dashboard" replace />}
+          />
 
-          {currentHospital?.role === 'Admin' && showFocusedSection('admin-quick-actions') && (
-            <AdminQuickActionsPanel pendingProviderRequests={pendingProviderRequests} adminSummaryResolved={adminSummaryResolved} />
-          )}
-        </div>
+          <Route
+            path="/ai-recommendations"
+            element={<AiRecommendationsPanel recommendations={recommendations} loading={recommendationsLoading} error={recommendationsError} />}
+          />
+
+          <Route
+            path="/admin-quick-actions"
+            element={currentHospital?.role === 'Admin' ? (
+              <AdminQuickActionsPanel pendingProviderRequests={pendingProviderRequests} adminSummaryResolved={adminSummaryResolved} />
+            ) : <Navigate to="/system-dashboard" replace />}
+          />
+
+          <Route
+            path="/access-account"
+            element={isHospitalRole ? (
+              <AccessAccountPanel
+                currentHospital={currentHospital}
+                loginForm={loginForm}
+                setLoginForm={setLoginForm}
+                handleReviewerLogin={handleReviewerLogin}
+                handleLogout={handleLogout}
+                reviewerAccounts={reviewerAccounts}
+                updateReviewerAccount={updateReviewerAccount}
+                changeOwnPassword={changeOwnPassword}
+              />
+            ) : <Navigate to={isReviewerRole ? '/hospital-dashboard' : '/system-dashboard'} replace />}
+          />
+
+          <Route path="/" element={<Navigate to={sectionToPath[getDefaultSection()] || '/system-dashboard'} replace />} />
+          <Route path="*" element={<Navigate to={sectionToPath[getDefaultSection()] || '/system-dashboard'} replace />} />
+        </Routes>
       </div>
 
       <Toast feedback={feedback} onDismiss={() => setFeedback({ type: '', message: '' })} />

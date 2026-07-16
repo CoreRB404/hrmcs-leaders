@@ -2,7 +2,7 @@ import { useState } from 'react';
 import LoginForm from './LoginForm';
 import RegisterForm from './RegisterForm';
 
-function LandingPage({ loginForm, setLoginForm, handleLogin, registerForm, setRegisterForm, registerHospital, feedback }) {
+function LandingPage({ loginForm, setLoginForm, handleLogin, registerForm, setRegisterForm, registerHospital, generatedReviewerCredentials, feedback }) {
   const [activeTab, setActiveTab] = useState('login');
 
   return (
@@ -14,13 +14,13 @@ function LandingPage({ loginForm, setLoginForm, handleLogin, registerForm, setRe
             Connected hospital network
           </div>
           <h1>Hospital Resource Management & Coordination System</h1>
-          <p>Publish supplies and staff availability, request critical resources across the network, and monitor every transfer from one secure command center.</p>
+          <p>Publish supply availability, request critical resources across the network, and monitor every transfer from one secure command center.</p>
           <div className="auth-features">
             <div className="auth-feature">
               <div className="auth-feature-icon">⬢</div>
               <div className="auth-feature-text">
                 <strong>Network availability</strong>
-                <span>Browse real-time supplies and staff across hospitals</span>
+                <span>Browse real-time supply availability across hospitals</span>
               </div>
             </div>
             <div className="auth-feature">
@@ -80,7 +80,12 @@ function LandingPage({ loginForm, setLoginForm, handleLogin, registerForm, setRe
             {activeTab === 'login' ? (
               <LoginForm loginForm={loginForm} setLoginForm={setLoginForm} handleLogin={handleLogin} />
             ) : (
-              <RegisterForm registerForm={registerForm} setRegisterForm={setRegisterForm} registerHospital={registerHospital} />
+              <RegisterForm
+                registerForm={registerForm}
+                setRegisterForm={setRegisterForm}
+                registerHospital={registerHospital}
+                generatedReviewerCredentials={generatedReviewerCredentials}
+              />
             )}
           </div>
         </div>

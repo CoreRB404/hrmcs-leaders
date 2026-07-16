@@ -11,16 +11,10 @@ function NetworkAvailability({
   setNetworkTypeFilter,
   inventorySort,
   setInventorySort,
-  staffSort,
-  setStaffSort,
   inventoryAvailabilityFilter,
   setInventoryAvailabilityFilter,
-  staffStatusFilter,
-  setStaffStatusFilter,
   filterNetworkInventory,
-  filterNetworkStaff,
   selectSupply,
-  selectStaffProvider,
   selectedSupplyId,
   selectedProviderId,
   selectedNetworkItem,
@@ -29,14 +23,13 @@ function NetworkAvailability({
   const locationOptions = [...new Set(hospitals.map((hospital) => hospital.location))];
   const typeOptions = [...new Set(hospitals.map((hospital) => hospital.type))];
   const filteredInventory = filterNetworkInventory();
-  const filteredStaff = filterNetworkStaff();
 
   return (
     <section id="network-availability" className="panel network-panel admin-focus-card">
       <div className="panel-header">
         <div>
           <h2>Network availability</h2>
-          <p className="subhead">Browse available supplies and staff across the network to choose the best provider for your request.</p>
+          <p className="subhead">Browse available supplies across the network to choose the best provider for your request.</p>
         </div>
         {selectedSupplyId ? (
           <div className="selected-summary">
@@ -96,67 +89,24 @@ function NetworkAvailability({
             </div>
           </div>
           <div className="inventory-list">
-            {filteredInventory.length ? filteredInventory.map((item) => (
-              <div key={item.id} className={`inventory-item ${selectedSupplyId === item.id ? 'selected' : ''}`} onClick={() => currentHospital?.role !== 'Admin' && selectSupply(item)} style={{ cursor: currentHospital?.role === 'Admin' ? 'default' : 'pointer' }}>
-                <div>
-                  <strong>{item.resourceName}</strong>
-                  <div className="item-meta">{getHospitalName(item.hospitalId)} · {item.resourceType}</div>
+            {filteredInventory.length ? filteredInventory.map((item) => {
+              const displayQuantity = item.publishedQuantity ?? item.availableQuantity ?? item.quantity;
+              return (
+                <div key={item.id} className={`inventory-item ${selectedSupplyId === item.id ? 'selected' : ''}`} onClick={() => currentHospital?.role !== 'Admin' && selectSupply(item)} style={{ cursor: currentHospital?.role === 'Admin' ? 'default' : 'pointer' }}>
+                  <div>
+                    <strong>{item.resourceName}</strong>
+                    <div className="item-meta">{getHospitalName(item.hospitalId)} · {item.resourceType}</div>
+                  </div>
+                  <div className="item-actions">
+                    <span className="item-value">{displayQuantity} avail</span>
+                    {currentHospital?.role !== 'Admin' && <span className="item-tag">Select</span>}
+                  </div>
                 </div>
-                <div className="item-actions">
-                  <span className="item-value">{item.availableQuantity ?? item.quantity} avail</span>
-                  {currentHospital?.role !== 'Admin' && <span className="item-tag">Select</span>}
-                </div>
-              </div>
-            )) : (
+              );
+            }) : (
               <div className="empty-state">
                 <div className="empty-state-icon">📦</div>
                 No supplies listed by other hospitals yet.
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="inventory-card">
-          <div className="section-header">
-            <div>
-              <h3 id="other-staff">Staff <span className="result-count">{filteredStaff.length}</span></h3>
-              <span className="section-note">Select to prefill a request</span>
-            </div>
-            <div style={{ display: 'flex', gap: 10 }}>
-              <div className="field-inline">
-                <label>Status</label>
-                <select value={staffStatusFilter} onChange={(e) => setStaffStatusFilter(e.target.value)}>
-                  <option value="All">All</option>
-                  <option value="Available">Available</option>
-                  <option value="Deployable">Deployable</option>
-                  <option value="Deployed">Deployed</option>
-                </select>
-              </div>
-              <div className="field-inline">
-                <label>Sort</label>
-                <select value={staffSort} onChange={(e) => setStaffSort(e.target.value)}>
-                  <option value="available">Highest avail</option>
-                  <option value="role">Role</option>
-                </select>
-              </div>
-            </div>
-          </div>
-          <div className="inventory-list">
-            {filteredStaff.length ? filteredStaff.map((item) => (
-              <div key={item.id} className={`inventory-item ${selectedSupplyId === item.id ? 'selected' : ''}`} onClick={() => currentHospital?.role !== 'Admin' && selectStaffProvider(item)} style={{ cursor: currentHospital?.role === 'Admin' ? 'default' : 'pointer' }}>
-                <div>
-                  <strong>{item.role}</strong>
-                  <div className="item-meta">{getHospitalName(item.hospitalId)} · {item.status}</div>
-                </div>
-                <div className="item-actions">
-                  <span className="item-value">{item.availableCount ?? item.count} active</span>
-                  {currentHospital?.role !== 'Admin' && <span className="item-tag">Select</span>}
-                </div>
-              </div>
-            )) : (
-              <div className="empty-state">
-                <div className="empty-state-icon">👥</div>
-                No staff availability listed by other hospitals yet.
               </div>
             )}
           </div>

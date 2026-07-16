@@ -1,10 +1,22 @@
 import { useState } from 'react';
 
-function RegisterForm({ registerForm, setRegisterForm, registerHospital }) {
+function RegisterForm({ registerForm, setRegisterForm, registerHospital, generatedReviewerCredentials }) {
   const [showPassword, setShowPassword] = useState(false);
 
   return (
     <form onSubmit={registerHospital} className="form-grid" id="register-form">
+      {generatedReviewerCredentials ? (
+        <div className="profile-card" style={{ borderStyle: 'dashed' }}>
+          <div className="profile-info">
+            <h3>Generated reviewer credentials</h3>
+            <p className="subhead">Save these credentials. They activate when an admin approves the hospital.</p>
+            <div className="profile-meta" style={{ display: 'grid', gap: 6 }}>
+              <span><strong>Doctor:</strong> {generatedReviewerCredentials.doctor.email} / {generatedReviewerCredentials.doctor.password}</span>
+              <span><strong>Pharmacist:</strong> {generatedReviewerCredentials.pharmacist.email} / {generatedReviewerCredentials.pharmacist.password}</span>
+            </div>
+          </div>
+        </div>
+      ) : null}
       <div className="form-grid two-col-form">
         <div className="field">
           <label htmlFor="reg-name">Hospital name</label>
@@ -97,6 +109,31 @@ function RegisterForm({ registerForm, setRegisterForm, registerHospital }) {
             <option value="Emergency">Emergency</option>
           </select>
         </div>
+      </div>
+      <div className="field">
+        <label htmlFor="reg-role">Account role</label>
+        <select
+          id="reg-role"
+          value={registerForm.role || 'Hospital'}
+          onChange={(e) => setRegisterForm({ ...registerForm, role: e.target.value })}
+        >
+          <option value="Hospital">Hospital</option>
+          <option value="Pharmacist">Pharmacist</option>
+          <option value="Doctor">Doctor</option>
+          <option value="Admin">Admin</option>
+        </select>
+      </div>
+      <div className="field">
+        <label htmlFor="reg-emergency-status">Emergency status</label>
+        <select
+          id="reg-emergency-status"
+          value={registerForm.emergencyStatus}
+          onChange={(e) => setRegisterForm({ ...registerForm, emergencyStatus: e.target.value })}
+        >
+          <option value="Low">Low</option>
+          <option value="Medium">Medium</option>
+          <option value="High">High</option>
+        </select>
       </div>
       <button type="submit" id="register-submit">Register hospital</button>
     </form>

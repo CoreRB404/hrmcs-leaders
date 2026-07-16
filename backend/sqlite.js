@@ -1,51 +1,70 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 
-const DB_PATH = path.join(__dirname, 'app.db');
+const isTestRun = process.argv.includes('--test');
+const DB_PATH = process.env.HRMCS_DB_PATH
+  ? path.resolve(process.env.HRMCS_DB_PATH)
+  : path.join(__dirname, isTestRun ? `app-${process.pid}.db` : 'app.db');
 let seedPromise = null;
+let dbOperationQueue = Promise.resolve();
+const hospitalEmailCache = new Map();
+
+function withDbLock(operation) {
+  const next = dbOperationQueue.then(operation, operation);
+  dbOperationQueue = next.catch(() => {});
+  return next;
+}
+
+function resetSeedState() {
+  seedPromise = null;
+  hospitalEmailCache.clear();
+  return Promise.resolve();
+}
 
 function openDb() {
-  return new sqlite3.Database(DB_PATH, (err) => {
+  const db = new sqlite3.Database(DB_PATH, (err) => {
     if (err) {
       console.error('Failed to open SQLite database', err.message);
     }
   });
+  db.configure('busyTimeout', 3000);
+  return db;
 }
 
 function runAsync(db, sql, params = []) {
-  return new Promise((resolve, reject) => {
+  return withDbLock(() => new Promise((resolve, reject) => {
     db.run(sql, params, function (err) {
       if (err) reject(err);
       else resolve(this);
     });
-  });
+  }));
 }
 
 function allAsync(db, sql, params = []) {
-  return new Promise((resolve, reject) => {
+  return withDbLock(() => new Promise((resolve, reject) => {
     db.all(sql, params, (err, rows) => {
       if (err) reject(err);
       else resolve(rows);
     });
-  });
+  }));
 }
 
 function getAsync(db, sql, params = []) {
-  return new Promise((resolve, reject) => {
+  return withDbLock(() => new Promise((resolve, reject) => {
     db.get(sql, params, (err, row) => {
       if (err) reject(err);
       else resolve(row);
     });
-  });
+  }));
 }
 
 function closeAsync(db) {
-  return new Promise((resolve, reject) => {
+  return withDbLock(() => new Promise((resolve, reject) => {
     db.close((err) => {
       if (err) reject(err);
       else resolve();
     });
-  });
+  }));
 }
 
 async function initializeDb() {
@@ -62,6 +81,7 @@ async function initializeDb() {
         visibility TEXT NOT NULL,
         type TEXT NOT NULL,
         role TEXT NOT NULL,
+        hospitalId TEXT,
         accountStatus TEXT NOT NULL,
         createdAt TEXT NOT NULL,
         emergencyStatus TEXT NOT NULL,
@@ -110,14 +130,46 @@ async function initializeDb() {
         requestType TEXT,
         priority TEXT,
         notes TEXT,
+        urgency TEXT,
         status TEXT NOT NULL,
         providerApproval TEXT,
         providerResponseNotes TEXT,
+        pharmacistApproval TEXT,
+        pharmacistApprovalNotes TEXT,
+        doctorApproval TEXT,
+        doctorApprovalNotes TEXT,
         history TEXT,
         createdAt TEXT NOT NULL,
         type TEXT
       )
     `);
+
+    const hospitalTableInfo = await allAsync(db, "PRAGMA table_info(hospitals)");
+    const hospitalColumns = new Set(hospitalTableInfo.map((column) => column.name));
+    if (!hospitalColumns.has('hospitalId')) {
+      try {
+        await runAsync(db, 'ALTER TABLE hospitals ADD COLUMN hospitalId TEXT');
+      } catch (error) {
+        // initializeDb can be entered concurrently during startup/tests.
+        if (!String(error.message).includes('duplicate column name')) throw error;
+      }
+    }
+
+    const tableInfo = await allAsync(db, "PRAGMA table_info(requests)");
+    const existingColumns = new Set(tableInfo.map((column) => column.name));
+    const migrations = [
+      ['urgency', 'TEXT'],
+      ['pharmacistApproval', 'TEXT'],
+      ['pharmacistApprovalNotes', 'TEXT'],
+      ['doctorApproval', 'TEXT'],
+      ['doctorApprovalNotes', 'TEXT'],
+    ];
+
+    for (const [columnName, columnType] of migrations) {
+      if (!existingColumns.has(columnName)) {
+        await runAsync(db, `ALTER TABLE requests ADD COLUMN ${columnName} ${columnType}`);
+      }
+    }
 
     await runAsync(db, `
       CREATE TABLE IF NOT EXISTS notifications (
@@ -133,7 +185,7 @@ async function initializeDb() {
   }
 }
 
-function seedDefaultUsers() {
+function seedDefaultUsers({ force = false } = {}) {
   if (seedPromise) {
     return seedPromise;
   }
@@ -145,6 +197,70 @@ function seedDefaultUsers() {
     const hash = (value) => crypto.createHash('sha256').update(value).digest('hex');
 
     try {
+      // Startup seeding must be non-destructive. Once the database contains
+      // hospitals, it is the source of truth and must survive server restarts.
+      // Tests and explicit demo resets can still request a clean seed with
+      // `force: true`.
+      const existing = await getAsync(db, 'SELECT COUNT(*) AS count FROM hospitals');
+      if (!force && existing.count > 0) {
+        const persistedRows = await allAsync(db, 'SELECT * FROM hospitals ORDER BY createdAt');
+        hospitalEmailCache.clear();
+        for (const row of persistedRows) {
+          hospitalEmailCache.set(row.email, row);
+        }
+        await closeAsync(db);
+        resolve();
+        return;
+      }
+
+      const reviewerAssignments = [
+        { hospitalId: 'hospital-demo', slug: 'northside', location: 'Northside', doctorEmail: 'doctor@demo.org', pharmacistEmail: 'pharmacist@demo.org' },
+        { hospitalId: 'hospital-central', slug: 'central', location: 'Midtown' },
+        { hospitalId: 'hospital-riverside', slug: 'riverside', location: 'Riverside' },
+        { hospitalId: 'hospital-westbridge', slug: 'westbridge', location: 'Westbridge' },
+        { hospitalId: 'hospital-eastbay', slug: 'eastbay', location: 'Eastbay' },
+      ];
+      const reviewerAccounts = reviewerAssignments.flatMap((assignment) => [
+        {
+          id: assignment.slug === 'northside' ? 'hospital-pharmacist' : `reviewer-${assignment.slug}-pharmacist`,
+          hospitalId: assignment.hospitalId,
+          name: `${assignment.slug[0].toUpperCase()}${assignment.slug.slice(1)} Pharmacist`,
+          location: assignment.location,
+          email: assignment.pharmacistEmail || `pharmacist.${assignment.slug}@demo.org`,
+          password: hash('Pharmacist@1234'),
+          visibility: 'Private',
+          type: 'Pharmacy',
+          role: 'Pharmacist',
+          accountStatus: 'Active',
+          createdAt: '2026-07-09T00:00:00.000Z',
+          emergencyStatus: 'Medium',
+          capacity: 0,
+          availableBeds: 0,
+          availableIcu: 0,
+          availableAmbulances: 0,
+          distance: 0,
+        },
+        {
+          id: assignment.slug === 'northside' ? 'hospital-doctor' : `reviewer-${assignment.slug}-doctor`,
+          hospitalId: assignment.hospitalId,
+          name: `${assignment.slug[0].toUpperCase()}${assignment.slug.slice(1)} Doctor`,
+          location: assignment.location,
+          email: assignment.doctorEmail || `doctor.${assignment.slug}@demo.org`,
+          password: hash('Doctor@1234'),
+          visibility: 'Private',
+          type: 'Clinical',
+          role: 'Doctor',
+          accountStatus: 'Active',
+          createdAt: '2026-07-09T00:00:00.000Z',
+          emergencyStatus: 'Medium',
+          capacity: 0,
+          availableBeds: 0,
+          availableIcu: 0,
+          availableAmbulances: 0,
+          distance: 0,
+        },
+      ]);
+
       const hospitals = [
         {
           id: 'hospital-admin',
@@ -254,6 +370,7 @@ function seedDefaultUsers() {
           availableAmbulances: 5,
           distance: 5,
         },
+        ...reviewerAccounts,
       ];
 
       const inventory = [
@@ -289,9 +406,14 @@ function seedDefaultUsers() {
           quantity: 2,
           requestType: 'Borrow',
           notes: 'Needs urgent ventilator support',
+          urgency: 'High',
           status: 'Pending',
           providerApproval: 'Pending',
           providerResponseNotes: '',
+          pharmacistApproval: 'Pending',
+          pharmacistApprovalNotes: '',
+          doctorApproval: 'Pending',
+          doctorApprovalNotes: '',
           history: JSON.stringify([
             { id: 'history-1-1', status: 'Requested', note: 'Northside Hospital requested 2 Ventilators from Central Medical Center', timestamp },
           ]),
@@ -306,9 +428,14 @@ function seedDefaultUsers() {
           quantity: 4,
           requestType: 'Borrow',
           notes: 'Rapid response needed for emergency department',
+          urgency: 'Critical',
           status: 'Pending',
           providerApproval: 'Pending',
           providerResponseNotes: '',
+          pharmacistApproval: 'Pending',
+          pharmacistApprovalNotes: '',
+          doctorApproval: 'Pending',
+          doctorApprovalNotes: '',
           history: JSON.stringify([
             { id: 'history-2-1', status: 'Requested', note: 'Central Medical Center requested 4 Blood Bags from Northside Hospital', timestamp },
           ]),
@@ -323,9 +450,14 @@ function seedDefaultUsers() {
           quantity: 3,
           requestType: 'Borrow',
           notes: 'Short-term monitoring loan',
+          urgency: 'Medium',
           status: 'Pending',
           providerApproval: 'Approved',
           providerResponseNotes: 'Ready to send',
+          pharmacistApproval: 'Approved',
+          pharmacistApprovalNotes: 'Reviewed',
+          doctorApproval: 'Approved',
+          doctorApprovalNotes: 'Reviewed',
           history: JSON.stringify([
             { id: 'history-3-1', status: 'Requested', note: 'Riverside Community Hospital requested 3 Portable Monitors from Eastbay Care Institute', timestamp },
             { id: 'history-3-2', status: 'Approved', note: 'Eastbay Care Institute approved the request', timestamp },
@@ -341,9 +473,14 @@ function seedDefaultUsers() {
           quantity: 10,
           requestType: 'Borrow',
           notes: 'Critical care need for masks',
+          urgency: 'High',
           status: 'Pending',
           providerApproval: 'Pending',
           providerResponseNotes: '',
+          pharmacistApproval: 'Pending',
+          pharmacistApprovalNotes: '',
+          doctorApproval: 'Pending',
+          doctorApprovalNotes: '',
           history: JSON.stringify([
             { id: 'history-4-1', status: 'Requested', note: 'Eastbay Care Institute requested 10 Masks from Riverside Community Hospital', timestamp },
           ]),
@@ -358,9 +495,14 @@ function seedDefaultUsers() {
           quantity: 2,
           requestType: 'Borrow',
           notes: 'Short-term loan for patient monitoring',
+          urgency: 'Medium',
           status: 'Approved',
           providerApproval: 'Approved',
           providerResponseNotes: 'Approved by provider and admin',
+          pharmacistApproval: 'Approved',
+          pharmacistApprovalNotes: 'Approved',
+          doctorApproval: 'Approved',
+          doctorApprovalNotes: 'Approved',
           history: JSON.stringify([
             { id: 'history-5-1', status: 'Requested', note: 'Northside Hospital requested 2 Portable Monitors from Eastbay Care Institute', timestamp },
             { id: 'history-5-2', status: 'Approved', note: 'Eastbay Care Institute approved the request', timestamp },
@@ -380,7 +522,7 @@ function seedDefaultUsers() {
         ['notification-6', 'A new transfer request needs admin review.', 'High'],
       ];
 
-      // Clear all tables
+      // A forced reset (or first run) starts from the known demo dataset.
       await runAsync(db, 'DELETE FROM hospitals');
       await runAsync(db, 'DELETE FROM inventory');
       await runAsync(db, 'DELETE FROM staff');
@@ -390,11 +532,11 @@ function seedDefaultUsers() {
       // Insert hospitals
       for (const hospital of hospitals) {
         await runAsync(db, `
-          INSERT INTO hospitals (id, name, location, email, password, visibility, type, role, accountStatus, createdAt, emergencyStatus, capacity, availableBeds, availableIcu, availableAmbulances, distance)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT OR REPLACE INTO hospitals (id, name, location, email, password, visibility, type, role, hospitalId, accountStatus, createdAt, emergencyStatus, capacity, availableBeds, availableIcu, availableAmbulances, distance)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `, [
           hospital.id, hospital.name, hospital.location, hospital.email, hospital.password,
-          hospital.visibility, hospital.type, hospital.role, hospital.accountStatus,
+          hospital.visibility, hospital.type, hospital.role, hospital.hospitalId || null, hospital.accountStatus,
           hospital.createdAt, hospital.emergencyStatus, hospital.capacity, hospital.availableBeds,
           hospital.availableIcu, hospital.availableAmbulances, hospital.distance,
         ]);
@@ -403,7 +545,7 @@ function seedDefaultUsers() {
       // Insert inventory
       for (const row of inventory) {
         await runAsync(db, `
-          INSERT INTO inventory (id, hospitalId, resourceType, resourceName, quantity, availableForBorrow, availableForOrder, createdAt)
+          INSERT OR REPLACE INTO inventory (id, hospitalId, resourceType, resourceName, quantity, availableForBorrow, availableForOrder, createdAt)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `, row);
       }
@@ -411,7 +553,7 @@ function seedDefaultUsers() {
       // Insert staff
       for (const row of staffEntries) {
         await runAsync(db, `
-          INSERT INTO staff (id, hospitalId, role, status, count, createdAt)
+          INSERT OR REPLACE INTO staff (id, hospitalId, role, status, count, createdAt)
           VALUES (?, ?, ?, ?, ?, ?)
         `, row);
       }
@@ -419,21 +561,27 @@ function seedDefaultUsers() {
       // Insert requests with new schema
       for (const req of requests) {
         await runAsync(db, `
-          INSERT INTO requests (id, requesterHospitalId, providerHospitalId, resourceName, quantity, requestType, notes, status, providerApproval, providerResponseNotes, history, createdAt, type)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT OR REPLACE INTO requests (id, requesterHospitalId, providerHospitalId, resourceName, quantity, requestType, notes, urgency, status, providerApproval, providerResponseNotes, pharmacistApproval, pharmacistApprovalNotes, doctorApproval, doctorApprovalNotes, history, createdAt, type)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `, [
           req.id, req.requesterHospitalId, req.providerHospitalId, req.resourceName,
-          req.quantity, req.requestType, req.notes, req.status, req.providerApproval,
-          req.providerResponseNotes, req.history, req.createdAt, req.type,
+          req.quantity, req.requestType, req.notes, req.urgency || 'Low', req.status, req.providerApproval,
+          req.providerResponseNotes, req.pharmacistApproval || 'Pending', req.pharmacistApprovalNotes || '', req.doctorApproval || 'Pending', req.doctorApprovalNotes || '', req.history, req.createdAt, req.type,
         ]);
       }
 
       // Insert notifications
       for (const row of notifications) {
         await runAsync(db, `
-          INSERT INTO notifications (id, message, severity)
+          INSERT OR REPLACE INTO notifications (id, message, severity)
           VALUES (?, ?, ?)
         `, row);
+      }
+
+      const seededRows = await allAsync(db, 'SELECT id, email, accountStatus, password, name, location, visibility, type, role, hospitalId, createdAt, emergencyStatus, capacity, availableBeds, availableIcu, availableAmbulances, distance FROM hospitals ORDER BY createdAt');
+      hospitalEmailCache.clear();
+      for (const row of seededRows) {
+        hospitalEmailCache.set(row.email, row);
       }
 
       await closeAsync(db);
@@ -462,7 +610,21 @@ function getHospitals() {
 function getInventory() {
   return new Promise((resolve, reject) => {
     const db = openDb();
-    db.all('SELECT * FROM inventory ORDER BY createdAt', (err, rows) => {
+    db.all(`
+      SELECT
+        id,
+        hospitalId,
+        resourceType,
+        resourceName,
+        quantity,
+        quantity AS publishedQuantity,
+        quantity AS availableQuantity,
+        availableForBorrow,
+        availableForOrder,
+        createdAt
+      FROM inventory
+      ORDER BY createdAt
+    `, (err, rows) => {
       db.close();
       if (err) reject(err); else resolve(rows);
     });
@@ -472,7 +634,22 @@ function getInventory() {
 function getStaff() {
   return new Promise((resolve, reject) => {
     const db = openDb();
-    db.all('SELECT * FROM staff ORDER BY createdAt', (err, rows) => {
+    db.all(`
+      SELECT
+        id,
+        hospitalId,
+        role,
+        status,
+        count,
+        count AS publishedCount,
+        CASE
+          WHEN status = 'Available' OR status = 'Deployable' THEN count
+          ELSE 0
+        END AS availableCount,
+        createdAt
+      FROM staff
+      ORDER BY createdAt
+    `, (err, rows) => {
       db.close();
       if (err) reject(err); else resolve(rows);
     });
@@ -507,12 +684,28 @@ function getNotifications() {
   });
 }
 
+function rememberHospitalEmail(hospital) {
+  if (hospital?.email) {
+    hospitalEmailCache.set(hospital.email, hospital);
+  }
+}
+
 function getHospitalByEmail(email) {
+  const cachedRow = hospitalEmailCache.get(email);
+  if (cachedRow) {
+    return Promise.resolve(cachedRow);
+  }
+
   return new Promise((resolve, reject) => {
     const db = openDb();
     db.get('SELECT * FROM hospitals WHERE email = ?', [email], (err, row) => {
       db.close();
-      if (err) reject(err); else resolve(row);
+      if (err) reject(err); else {
+        if (row) {
+          hospitalEmailCache.set(email, row);
+        }
+        resolve(row);
+      }
     });
   });
 }
@@ -522,12 +715,13 @@ function getHospitalByEmail(email) {
 async function insertHospital(hospital) {
   const db = openDb();
   try {
+    hospitalEmailCache.set(hospital.email, hospital);
     await runAsync(db, `
-      INSERT OR REPLACE INTO hospitals (id, name, location, email, password, visibility, type, role, accountStatus, createdAt, emergencyStatus, capacity, availableBeds, availableIcu, availableAmbulances, distance)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT OR REPLACE INTO hospitals (id, name, location, email, password, visibility, type, role, hospitalId, accountStatus, createdAt, emergencyStatus, capacity, availableBeds, availableIcu, availableAmbulances, distance)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       hospital.id, hospital.name, hospital.location, hospital.email, hospital.password,
-      hospital.visibility, hospital.type, hospital.role, hospital.accountStatus,
+      hospital.visibility, hospital.type, hospital.role, hospital.hospitalId || null, hospital.accountStatus,
       hospital.createdAt, hospital.emergencyStatus, hospital.capacity, hospital.availableBeds,
       hospital.availableIcu, hospital.availableAmbulances, hospital.distance,
     ]);
@@ -538,10 +732,53 @@ async function insertHospital(hospital) {
   }
 }
 
+async function upsertInventoryItem(item) {
+  const db = openDb();
+  try {
+    await runAsync(db, `
+      INSERT OR REPLACE INTO inventory (id, hospitalId, resourceType, resourceName, quantity, availableForBorrow, availableForOrder, createdAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      item.id,
+      item.hospitalId,
+      item.resourceType,
+      item.resourceName,
+      item.quantity,
+      item.availableForBorrow ? 1 : 0,
+      item.availableForOrder ? 1 : 0,
+      item.createdAt || new Date().toISOString(),
+    ]);
+    await closeAsync(db);
+  } catch (err) {
+    try { await closeAsync(db); } catch (e) { /* ignore */ }
+    throw err;
+  }
+}
+
+async function insertStaffEntry(entry) {
+  const db = openDb();
+  try {
+    await runAsync(db, `
+      INSERT OR REPLACE INTO staff (id, hospitalId, role, status, count, createdAt)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `, [entry.id, entry.hospitalId, entry.role, entry.status, entry.count, entry.createdAt]);
+    await closeAsync(db);
+  } catch (err) {
+    try { await closeAsync(db); } catch (e) { /* ignore */ }
+    throw err;
+  }
+}
+
 async function updateHospitalStatus(hospitalId, accountStatus) {
   const db = openDb();
   try {
     await runAsync(db, 'UPDATE hospitals SET accountStatus = ? WHERE id = ?', [accountStatus, hospitalId]);
+    for (const [email, hospital] of hospitalEmailCache.entries()) {
+      if (hospital.id === hospitalId) {
+        hospital.accountStatus = accountStatus;
+        hospitalEmailCache.set(email, hospital);
+      }
+    }
     await closeAsync(db);
   } catch (err) {
     try { await closeAsync(db); } catch (e) { /* ignore */ }
@@ -549,13 +786,38 @@ async function updateHospitalStatus(hospitalId, accountStatus) {
   }
 }
 
+async function updateHospitalAccount(account) {
+  const db = openDb();
+  try {
+    const existing = await getAsync(db, 'SELECT * FROM hospitals WHERE id = ?', [account.id]);
+    if (!existing) throw new Error('Account not found');
+    await runAsync(db, 'UPDATE hospitals SET email = ?, password = ?, accountStatus = ? WHERE id = ?', [
+      account.email,
+      account.password,
+      account.accountStatus,
+      account.id,
+    ]);
+    if (existing.email !== account.email) hospitalEmailCache.delete(existing.email);
+    hospitalEmailCache.set(account.email, { ...existing, ...account });
+    await closeAsync(db);
+  } catch (err) {
+    try { await closeAsync(db); } catch (e) { /* ignore */ }
+    throw err;
+  }
+}
+
 async function deleteHospitalById(hospitalId) {
   const db = openDb();
   try {
-    await runAsync(db, 'DELETE FROM hospitals WHERE id = ?', [hospitalId]);
+    await runAsync(db, 'DELETE FROM hospitals WHERE id = ? OR hospitalId = ?', [hospitalId, hospitalId]);
     await runAsync(db, 'DELETE FROM inventory WHERE hospitalId = ?', [hospitalId]);
     await runAsync(db, 'DELETE FROM staff WHERE hospitalId = ?', [hospitalId]);
     await runAsync(db, 'DELETE FROM requests WHERE requesterHospitalId = ? OR providerHospitalId = ?', [hospitalId, hospitalId]);
+    for (const [email, hospital] of hospitalEmailCache.entries()) {
+      if (hospital.id === hospitalId || hospital.hospitalId === hospitalId) {
+        hospitalEmailCache.delete(email);
+      }
+    }
     await closeAsync(db);
   } catch (err) {
     try { await closeAsync(db); } catch (e) { /* ignore */ }
@@ -567,8 +829,8 @@ async function insertRequest(request) {
   const db = openDb();
   try {
     await runAsync(db, `
-      INSERT OR REPLACE INTO requests (id, requesterHospitalId, providerHospitalId, hospitalId, resourceName, patientType, need, quantity, requestType, priority, notes, status, providerApproval, providerResponseNotes, history, createdAt, type)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT OR REPLACE INTO requests (id, requesterHospitalId, providerHospitalId, hospitalId, resourceName, patientType, need, quantity, requestType, priority, notes, urgency, status, providerApproval, providerResponseNotes, pharmacistApproval, pharmacistApprovalNotes, doctorApproval, doctorApprovalNotes, history, createdAt, type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       request.id,
       request.requesterHospitalId || null,
@@ -581,9 +843,14 @@ async function insertRequest(request) {
       request.requestType || null,
       request.priority || null,
       request.notes || null,
+      request.urgency || 'Low',
       request.status,
       request.providerApproval || null,
       request.providerResponseNotes || null,
+      request.pharmacistApproval || 'Pending',
+      request.pharmacistApprovalNotes || '',
+      request.doctorApproval || 'Pending',
+      request.doctorApprovalNotes || '',
       JSON.stringify(request.history || []),
       request.createdAt,
       request.type || null,
@@ -599,11 +866,16 @@ async function updateRequest(request) {
   const db = openDb();
   try {
     await runAsync(db, `
-      UPDATE requests SET status = ?, providerApproval = ?, providerResponseNotes = ?, history = ? WHERE id = ?
+      UPDATE requests SET status = ?, providerApproval = ?, providerResponseNotes = ?, pharmacistApproval = ?, pharmacistApprovalNotes = ?, doctorApproval = ?, doctorApprovalNotes = ?, urgency = ?, history = ? WHERE id = ?
     `, [
       request.status,
       request.providerApproval || null,
       request.providerResponseNotes || null,
+      request.pharmacistApproval || 'Pending',
+      request.pharmacistApprovalNotes || '',
+      request.doctorApproval || 'Pending',
+      request.doctorApprovalNotes || '',
+      request.urgency || 'Low',
       JSON.stringify(request.history || []),
       request.id,
     ]);
@@ -626,13 +898,10 @@ async function checkEmailExists(email) {
   }
 }
 
-seedDefaultUsers().catch((error) => {
-  console.error('Failed to seed default database rows', error);
-});
-
 module.exports = {
   initializeDb,
   seedDefaultUsers,
+  resetSeedState,
   getHospitals,
   getInventory,
   getStaff,
@@ -641,9 +910,13 @@ module.exports = {
   getHospitalByEmail,
   // Write-through persistence
   insertHospital,
+  upsertInventoryItem,
+  insertStaffEntry,
   updateHospitalStatus,
+  updateHospitalAccount,
   deleteHospitalById,
   insertRequest,
   updateRequest,
   checkEmailExists,
+  rememberHospitalEmail,
 };

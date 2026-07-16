@@ -1,12 +1,16 @@
 const {
   seedDefaultUsers,
+  resetSeedState,
   getHospitals: getSqliteHospitals,
   getInventory: getSqliteInventory,
   getStaff: getSqliteStaff,
   getRequests: getSqliteRequests,
   getNotifications: getSqliteNotifications,
   insertHospital: sqliteInsertHospital,
+  upsertInventoryItem: sqliteUpsertInventoryItem,
+  insertStaffEntry: sqliteInsertStaffEntry,
   updateHospitalStatus: sqliteUpdateHospitalStatus,
+  updateHospitalAccount: sqliteUpdateHospitalAccount,
   deleteHospitalById: sqliteDeleteHospitalById,
   insertRequest: sqliteInsertRequest,
   updateRequest: sqliteUpdateRequest,
@@ -18,7 +22,7 @@ let initialized = false;
 let initializationPromise = null;
 
 async function initializeState() {
-  if (initialized) {
+  if (initialized && state.hospitals.length) {
     return state;
   }
 
@@ -39,7 +43,13 @@ async function initializeState() {
     })();
   }
 
-  return initializationPromise;
+  try {
+    return await initializationPromise;
+  } finally {
+    if (initialized) {
+      initializationPromise = null;
+    }
+  }
 }
 
 function getState() {
@@ -53,7 +63,20 @@ function saveState() {
 async function resetDemoData() {
   initialized = false;
   initializationPromise = null;
-  return initializeState();
+  state = { hospitals: [], inventory: [], staff: [], requests: [], notifications: [] };
+  await resetSeedState();
+  await seedDefaultUsers({ force: true });
+
+  const [hospitals, inventory, staff, requests, notifications] = await Promise.all([
+    getSqliteHospitals(),
+    getSqliteInventory(),
+    getSqliteStaff(),
+    getSqliteRequests(),
+    getSqliteNotifications(),
+  ]);
+  state = { hospitals, inventory, staff, requests, notifications };
+  initialized = true;
+  return state;
 }
 
 function getHospitals() {
@@ -101,6 +124,22 @@ async function persistHospital(hospital) {
   }
 }
 
+async function persistInventoryItem(item) {
+  try {
+    await sqliteUpsertInventoryItem(item);
+  } catch (err) {
+    console.error('Failed to persist inventory item to SQLite', err);
+  }
+}
+
+async function persistStaffEntry(entry) {
+  try {
+    await sqliteInsertStaffEntry(entry);
+  } catch (err) {
+    console.error('Failed to persist staff entry to SQLite', err);
+  }
+}
+
 // Write-through: persist hospital status change to SQLite
 async function persistHospitalStatus(hospitalId, accountStatus) {
   try {
@@ -108,6 +147,10 @@ async function persistHospitalStatus(hospitalId, accountStatus) {
   } catch (err) {
     console.error('Failed to persist hospital status to SQLite', err);
   }
+}
+
+async function persistHospitalAccount(account) {
+  await sqliteUpdateHospitalAccount(account);
 }
 
 // Write-through: persist hospital deletion to SQLite
@@ -165,7 +208,10 @@ module.exports = {
   getHospitalByEmailFromMemory,
   emailExistsInMemory,
   persistHospital,
+  persistInventoryItem,
+  persistStaffEntry,
   persistHospitalStatus,
+  persistHospitalAccount,
   persistHospitalDeletion,
   persistRequest,
   persistRequestUpdate,

@@ -48,6 +48,16 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+function requireRole(requiredRole) {
+  return (req, res, next) => {
+    if (!req.auth || req.auth.role !== requiredRole) {
+      return res.status(403).json({ error: `${requiredRole} access required` });
+    }
+
+    next();
+  };
+}
+
 function denyAdmin(req, res, next) {
   if (req.auth && req.auth.role === 'Admin') {
     return res.status(403).json({ error: 'Admin cannot perform hospital operations' });
@@ -63,5 +73,6 @@ module.exports = {
   verifyToken,
   authMiddleware,
   requireAdmin,
+  requireRole,
   denyAdmin,
 };
