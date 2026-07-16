@@ -6,61 +6,81 @@ function getInventoryItem(hospitalId, resourceName) {
   return data.getInventory().find((item) => item.hospitalId === hospitalId && item.resourceName.toLowerCase() === resourceName.toLowerCase());
 }
 
-function reserveInventoryItem(hospitalId, resourceName, quantity) {
+const URGENCY_RANK = { Low: 1, Medium: 2, High: 3, Critical: 4 };
+const URGENCY_BY_RANK = { 1: 'Low', 2: 'Medium', 3: 'High', 4: 'Critical' };
+const AGING_HOURS_PER_LEVEL = 24;
+
+function getRequestPriority(request, now = Date.now()) {
+  const urgency = URGENCY_RANK[request.urgency] ? request.urgency : 'Low';
+  const createdAt = new Date(request.createdAt).getTime();
+  const waitingHours = Number.isFinite(createdAt) ? Math.max(0, Math.floor((now - createdAt) / 3600000)) : 0;
+  const agingLevels = Math.floor(waitingHours / AGING_HOURS_PER_LEVEL);
+  const effectiveRank = Math.min(URGENCY_RANK.Critical, URGENCY_RANK[urgency] + agingLevels);
+  const effectiveUrgency = URGENCY_BY_RANK[effectiveRank];
+  return {
+    urgency,
+    effectiveRank,
+    effectiveUrgency,
+    waitingHours,
+    reason: effectiveUrgency === urgency
+      ? `${urgency} urgency, then oldest request first`
+      : `${urgency} urgency aged to ${effectiveUrgency} after ${waitingHours} hours`,
+  };
+}
+
+function prioritizeRequests(requests, now = Date.now()) {
+  const pending = requests.filter((request) => request.status === 'Pending' && request.type !== 'PatientSupport');
+  const queues = new Map();
+  for (const request of pending) {
+    const queue = queues.get(request.providerHospitalId) || [];
+    queue.push(request);
+    queues.set(request.providerHospitalId, queue);
+  }
+
+  const priorityById = new Map();
+  for (const queue of queues.values()) {
+    queue.sort((first, second) => {
+      const firstPriority = getRequestPriority(first, now);
+      const secondPriority = getRequestPriority(second, now);
+      return secondPriority.effectiveRank - firstPriority.effectiveRank
+        || new Date(first.createdAt).getTime() - new Date(second.createdAt).getTime();
+    });
+    queue.forEach((request, index) => {
+      priorityById.set(request.id, { ...getRequestPriority(request, now), queuePosition: index + 1, queueSize: queue.length });
+    });
+  }
+
+  return requests
+    .map((request) => ({ ...request, ...(priorityById.get(request.id) || {}) }))
+    .sort((first, second) => {
+      const firstPending = first.status === 'Pending' && first.type !== 'PatientSupport';
+      const secondPending = second.status === 'Pending' && second.type !== 'PatientSupport';
+      if (firstPending !== secondPending) return firstPending ? -1 : 1;
+      if (firstPending && first.effectiveRank !== second.effectiveRank) return second.effectiveRank - first.effectiveRank;
+      return new Date(first.createdAt).getTime() - new Date(second.createdAt).getTime();
+    });
+}
+
+function commitInventoryItem(hospitalId, resourceName, quantity) {
   const inventory = data.getInventory();
   const item = inventory.find((it) => it.hospitalId === hospitalId && it.resourceName.toLowerCase() === resourceName.toLowerCase());
   if (!item) {
     throw new Error('Resource not found at the selected provider');
   }
 
-  const reserved = item.reserved || 0;
-  const available = (item.availableQuantity ?? item.quantity) - reserved;
+  const available = item.availableQuantity ?? item.quantity;
   if (quantity > available) {
     throw new Error('Not enough inventory available to reserve');
   }
 
-  item.reserved = reserved + quantity;
-  item.availableQuantity = Math.max(0, (item.availableQuantity ?? item.quantity) - quantity);
+  item.quantity = Math.max(0, (item.quantity ?? available) - quantity);
+  item.availableQuantity = item.quantity;
   item.lentQuantity = (item.lentQuantity || 0) + quantity;
   const state = data.getState();
   state.inventory = inventory;
   data.setState(state);
   data.persistInventoryItem(item);
   return item;
-}
-
-function finalizeInventoryReservation(request) {
-  if (!request.resourceName) return;
-  const inventory = data.getInventory();
-  const item = inventory.find((it) => it.hospitalId === request.providerHospitalId && it.resourceName.toLowerCase() === request.resourceName.toLowerCase());
-  if (!item) {
-    return;
-  }
-
-  item.quantity = Math.max(0, (item.quantity || item.publishedQuantity || 0) - request.quantity);
-  item.availableQuantity = item.quantity;
-  item.reserved = Math.max(0, (item.reserved || 0) - request.quantity);
-
-  const state = data.getState();
-  state.inventory = inventory;
-  data.setState(state);
-  data.persistInventoryItem(item);
-}
-
-function releaseInventoryReservation(request) {
-  if (!request.resourceName) return;
-  const inventory = data.getInventory();
-  const item = inventory.find((it) => it.hospitalId === request.providerHospitalId && it.resourceName.toLowerCase() === request.resourceName.toLowerCase());
-  if (!item) {
-    return;
-  }
-
-  item.availableQuantity = Math.min(item.publishedQuantity ?? item.quantity, (item.availableQuantity ?? item.quantity) + request.quantity);
-  item.reserved = Math.max(0, (item.reserved || 0) - request.quantity);
-  const state = data.getState();
-  state.inventory = inventory;
-  data.setState(state);
-  data.persistInventoryItem(item);
 }
 
 function registerHospital({ name, location, email, password, visibility, type, role = 'Hospital', emergencyStatus }) {
@@ -174,7 +194,7 @@ function registerHospital({ name, location, email, password, visibility, type, r
   return { ...publicHospital, reviewerCredentials };
 }
 
-function updateHospitalEmergencyStatus(hospitalId, emergencyStatus) {
+async function updateHospitalEmergencyStatus(hospitalId, emergencyStatus) {
   const hospitals = data.getHospitals();
   const notifications = data.getNotifications();
   const hospital = hospitals.find((entry) => entry.id === hospitalId);
@@ -199,8 +219,30 @@ function updateHospitalEmergencyStatus(hospitalId, emergencyStatus) {
     timestamp: new Date().toISOString(),
   }, ...notifications];
   data.setState(state);
-  data.persistHospital(hospital);
+  await data.persistHospital(hospital);
 
+  return hospital;
+}
+
+async function updateHospitalDistance(hospitalId, distance) {
+  const hospitals = data.getHospitals();
+  const hospital = hospitals.find((entry) => entry.id === hospitalId);
+
+  if (!hospital) {
+    throw new Error('Hospital not found');
+  }
+
+  const numericDistance = Number(distance);
+  if (!Number.isFinite(numericDistance) || numericDistance < 0) {
+    throw new Error('Distance must be a non-negative number');
+  }
+
+  hospital.distance = numericDistance;
+  const state = data.getState();
+  state.hospitals = hospitals;
+  data.setState(state);
+  await data.persistHospital(hospital);
+  await data.persistHospitalDistance('hospital-admin', hospital.id, numericDistance);
   return hospital;
 }
 
@@ -237,13 +279,6 @@ function createResourceRequest({ requesterHospitalId, providerHospitalId, resour
     throw new Error('Provider hospital must be active to fulfill requests');
   }
 
-  const item = getInventoryItem(providerHospitalId, resourceName);
-  if (item && item.availableForBorrow) {
-    // Provider has the item listed — reserve inventory
-    reserveInventoryItem(providerHospitalId, resourceName, quantity);
-  }
-  // If item is not listed, proceed anyway as a general resource request
-
   const requests = data.getRequests();
   const notifications = data.getNotifications();
   const timestamp = new Date().toISOString();
@@ -258,7 +293,7 @@ function createResourceRequest({ requesterHospitalId, providerHospitalId, resour
     quantity,
     requestType,
     notes,
-    urgency: urgency || 'Low',
+    urgency: URGENCY_RANK[urgency] ? urgency : 'Low',
     status: 'Pending',
     providerApproval: 'Pending',
     pharmacistApproval: 'Pending',
@@ -319,6 +354,9 @@ function respondToRequest({ requestId, responderHospitalId, response, notes }) {
   const status = response === 'approve' ? 'Approved' : 'Rejected';
   const responderName = data.getHospitals().find((h) => h.id === responderHospitalId)?.name || responderHospitalId;
 
+  if (status === 'Approved') {
+    commitInventoryItem(request.providerHospitalId, request.resourceName, request.quantity);
+  }
   request.providerApproval = status;
   request.providerResponseNotes = notes || '';
   request.history = request.history || [];
@@ -330,7 +368,6 @@ function respondToRequest({ requestId, responderHospitalId, response, notes }) {
   });
 
   if (status === 'Rejected') {
-    releaseInventoryReservation(request);
     request.status = 'Rejected';
   }
 
@@ -386,7 +423,6 @@ function reviewRequestClinicalStage({ requestId, reviewerHospitalId, reviewerRol
       request.status = 'Rejected';
       request.doctorApproval = 'Rejected';
       request.providerApproval = 'Rejected';
-      releaseInventoryReservation(request);
     }
   } else if (reviewerRole === 'Doctor') {
     if (request.providerHospitalId !== reviewerHospitalId) {
@@ -412,7 +448,6 @@ function reviewRequestClinicalStage({ requestId, reviewerHospitalId, reviewerRol
     if (request.doctorApproval === 'Rejected') {
       request.status = 'Rejected';
       request.providerApproval = 'Rejected';
-      releaseInventoryReservation(request);
     }
   } else {
     throw new Error('Reviewer role is not supported for clinical approval');
@@ -462,8 +497,6 @@ function approveRequest({ requestId, approverHospitalId }) {
     note: `Admin approved request ${requestId}`,
     timestamp: new Date().toISOString(),
   });
-
-  finalizeInventoryReservation(request);
 
   const state = data.getState();
   state.requests = requests;
@@ -612,6 +645,8 @@ function deleteHospitalAccount(hospitalId) {
 
 module.exports = {
   registerHospital,
+  updateHospitalEmergencyStatus,
+  updateHospitalDistance,
   addResourceListing,
   createResourceRequest,
   respondToRequest,
@@ -622,4 +657,6 @@ module.exports = {
   getAdminSummary,
   deleteHospitalAccount,
   resetDemoData: data.resetDemoData,
+  prioritizeRequests,
+  getRequestPriority,
 };

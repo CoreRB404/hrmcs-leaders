@@ -30,7 +30,10 @@ function ResourceRequestList({ currentHospital, filteredRequests, timelineOpenId
                 <span className={`badge ${request.status === 'Pending' || request.status === 'Open' ? 'pending' : request.status === 'Approved' ? 'success' : 'danger'}`}>
                   {request.status}
                 </span>
+                {request.queuePosition ? <span className="badge pending">Queue #{request.queuePosition} of {request.queueSize}</span> : null}
+                {request.urgency ? <span className={`badge urgency-${request.urgency.toLowerCase()}`}>{request.urgency} urgency</span> : null}
               </div>
+              {request.reason ? <div style={{ marginTop: 5, fontSize: '0.76rem', color: 'var(--text-secondary)' }}>{request.reason}</div> : null}
               <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: 4 }}>
                 {request.type === 'PatientSupport' ? (
                   <>{getHospitalName(request.hospitalId)} · Patient Support ({request.patientType}) · Priority: {request.priority}</>

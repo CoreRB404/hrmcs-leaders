@@ -1,18 +1,19 @@
 const express = require('express');
 const data = require('../data');
-const { createResourceRequest, respondToRequest, reviewRequestClinicalStage, approveRequest } = require('../utils/hospitalService');
+const { createResourceRequest, respondToRequest, reviewRequestClinicalStage, approveRequest, prioritizeRequests } = require('../utils/hospitalService');
 const { recommendHospitals } = require('../utils/recommendation');
 const { authMiddleware, requireAdmin, requireRole, denyAdmin } = require('../utils/auth');
 
 const router = express.Router();
 
 const getHospitalById = (hospitalId) => data.getHospitals().find((hospital) => hospital.id === hospitalId);
+const VALID_URGENCIES = ['Low', 'Medium', 'High', 'Critical'];
 
 // GET /api/requests — role-based filtering
 router.get('/', authMiddleware, async (req, res) => {
   try {
     await data.initializeState();
-    const allRequests = data.getRequests();
+    const allRequests = prioritizeRequests(data.getRequests());
     const userRole = req.auth.role;
     const userId = req.auth.id;
 
@@ -47,6 +48,9 @@ router.post('/', authMiddleware, denyAdmin, async (req, res) => {
       console.log('[POST /api/requests] VALIDATION FAILED:', { requesterHospitalId: !!requesterHospitalId, providerHospitalId: !!providerHospitalId, resourceName: !!resourceName, quantity, quantityCheck: !quantity || quantity <= 0 });
       return res.status(400).json({ error: 'Request creation requires requester, provider, resource name, and positive quantity.' });
     }
+    if (urgency && !VALID_URGENCIES.includes(urgency)) {
+      return res.status(400).json({ error: 'Urgency must be Low, Medium, High, or Critical.' });
+    }
 
     if (requesterHospitalId === providerHospitalId) {
       return res.status(400).json({ error: 'You cannot request resources from your own hospital.' });
@@ -58,7 +62,7 @@ router.post('/', authMiddleware, denyAdmin, async (req, res) => {
     }
 
     const request = createResourceRequest(req.body);
-    const suggestions = await recommendHospitals({ currentHospitalId: requesterHospitalId, resourceName, quantity });
+    const suggestions = await recommendHospitals({ currentHospitalId: requesterHospitalId, resourceName, quantity, urgency: urgency || 'Low' });
     res.json({ request, suggestions });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -136,13 +140,16 @@ router.post('/:id/approve', authMiddleware, requireAdmin, async (req, res) => {
 router.post('/transfer', authMiddleware, denyAdmin, async (req, res) => {
   try {
     await data.initializeState();
-    const { requesterHospitalId, providerHospitalId, resourceName, quantity } = req.body;
+    const { requesterHospitalId, providerHospitalId, resourceName, quantity, urgency } = req.body;
     if (!requesterHospitalId || !providerHospitalId || !resourceName || !quantity || quantity <= 0) {
       return res.status(400).json({ error: 'Please select a provider, add a resource name, and enter a positive quantity.' });
     }
 
     if (requesterHospitalId === providerHospitalId) {
       return res.status(400).json({ error: 'Cannot request resources from your own hospital.' });
+    }
+    if (urgency && !VALID_URGENCIES.includes(urgency)) {
+      return res.status(400).json({ error: 'Urgency must be Low, Medium, High, or Critical.' });
     }
 
     const provider = getHospitalById(providerHospitalId);

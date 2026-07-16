@@ -6,9 +6,11 @@ const {
   getStaff: getSqliteStaff,
   getRequests: getSqliteRequests,
   getNotifications: getSqliteNotifications,
+  getHospitalDistances: getSqliteHospitalDistances,
   insertHospital: sqliteInsertHospital,
   upsertInventoryItem: sqliteUpsertInventoryItem,
   insertStaffEntry: sqliteInsertStaffEntry,
+  upsertHospitalDistance: sqliteUpsertHospitalDistance,
   updateHospitalStatus: sqliteUpdateHospitalStatus,
   updateHospitalAccount: sqliteUpdateHospitalAccount,
   deleteHospitalById: sqliteDeleteHospitalById,
@@ -140,6 +142,10 @@ async function persistStaffEntry(entry) {
   }
 }
 
+async function persistHospitalDistance(fromHospitalId, toHospitalId, distance) {
+  await sqliteUpsertHospitalDistance(fromHospitalId, toHospitalId, distance);
+}
+
 // Write-through: persist hospital status change to SQLite
 async function persistHospitalStatus(hospitalId, accountStatus) {
   try {
@@ -202,6 +208,7 @@ module.exports = {
   getStaff,
   getRequests,
   getNotifications,
+  getHospitalDistances: getSqliteHospitalDistances,
   setState,
   resetDemoData,
   // New helpers
@@ -210,6 +217,7 @@ module.exports = {
   persistHospital,
   persistInventoryItem,
   persistStaffEntry,
+  persistHospitalDistance,
   persistHospitalStatus,
   persistHospitalAccount,
   persistHospitalDeletion,

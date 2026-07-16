@@ -43,6 +43,7 @@ function App() {
   const [recommendations, setRecommendations] = useState([]);
   const [recommendationsLoading, setRecommendationsLoading] = useState(false);
   const [recommendationsError, setRecommendationsError] = useState('');
+  const [recommendationMap, setRecommendationMap] = useState({ nodes: [], edges: [], currentHospitalId: null });
   const [networkInventory, setNetworkInventory] = useState([]);
   const [networkStaff, setNetworkStaff] = useState([]);
   const [networkSearch, setNetworkSearch] = useState('');
@@ -356,48 +357,6 @@ function App() {
       });
   };
 
-  const buildFallbackRecommendations = (resourceName, quantity, inventoryItems, staffItems) => {
-    const normalizedResource = (resourceName || '').trim().toLowerCase();
-    const relevantItems = inventoryItems.filter((item) => {
-      if (!normalizedResource) return true;
-      return (item.resourceName || '').toLowerCase().includes(normalizedResource);
-    });
-
-    const providers = hospitals.filter((hospital) => hospital.accountStatus === 'Active' && hospital.role === 'Hospital' && hospital.id !== currentHospital?.id);
-
-    return providers
-      .map((hospital) => {
-        const inventoryItem = relevantItems.find((item) => item.hospitalId === hospital.id);
-        const staffForHospital = staffItems.filter((member) => member.hospitalId === hospital.id && (member.status === 'Available' || member.status === 'Deployable'));
-        const stock = inventoryItem
-          ? (inventoryItem.publishedQuantity ?? inventoryItem.availableQuantity ?? inventoryItem.quantity ?? 0)
-          : 0;
-        const availableStaff = staffForHospital.reduce((total, member) => total + (member.availableCount ?? member.publishedCount ?? member.count ?? 0), 0);
-
-        if (!inventoryItem && availableStaff <= 0) {
-          return null;
-        }
-
-        const normalizedStock = Number(stock || 0);
-        const stockScore = normalizedStock <= 0 ? 0 : Math.min(5, Math.max(1, Math.round(normalizedStock / 10)));
-        const staffScore = Math.min(5, Math.max(1, availableStaff || 0));
-        const emergencyScore = hospital.emergencyStatus === 'High' ? 5 : hospital.emergencyStatus === 'Medium' ? 3 : 2;
-        const score = Number(Math.min(5, Math.max(0, (stockScore * 0.7) + (staffScore * 0.2) + (emergencyScore * 0.1))).toFixed(2));
-
-        return {
-          id: `${hospital.id}-${inventoryItem?.id || 'fallback'}`,
-          name: hospital.name,
-          resourceName: inventoryItem?.resourceName || resourceName || 'Resource',
-          stock: normalizedStock,
-          availableStaff,
-          score,
-        };
-      })
-      .filter(Boolean)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, Math.max(3, Number(quantity) || 5));
-  };
-
   const loadData = async () => {
     try {
       const inventoryRes = await fetch('/api/inventory');
@@ -405,17 +364,20 @@ function App() {
       const recommendationResource = requestForm.resourceName || '';
       const recommendationQuantity = Number(requestForm.quantity) || 10;
       const recommendationUrgency = requestForm.urgency || 'High';
+      const recommendationRequesterId = currentHospital?.hospitalId || currentHospital?.id || '';
       const recommendationRequest = authFetch(
-        `/api/recommendations${recommendationResource ? `/${encodeURIComponent(recommendationResource)}` : ''}?currentHospitalId=${encodeURIComponent(currentHospital?.id || '')}&quantity=${recommendationQuantity}&urgency=${encodeURIComponent(recommendationUrgency)}`
+        `/api/recommendations${recommendationResource ? `/${encodeURIComponent(recommendationResource)}` : ''}?currentHospitalId=${encodeURIComponent(recommendationRequesterId)}&quantity=${recommendationQuantity}&urgency=${encodeURIComponent(recommendationUrgency)}`
       );
+      const recommendationMapRequest = authFetch(`/api/recommendations/network/map?currentHospitalId=${encodeURIComponent(recommendationRequesterId)}`);
 
-      const [dashboardRes, requestsRes, hospitalsRes, notificationsRes, recommendationsRes, staffRes] = await Promise.all([
+      const [dashboardRes, requestsRes, hospitalsRes, notificationsRes, recommendationsRes, staffRes, recommendationMapRes] = await Promise.all([
         authFetch('/api/dashboard'),
         authFetch('/api/requests'),
         authFetch(`/api/hospitals?search=${encodeURIComponent(hospitalSearch)}`),
         authFetch('/api/notifications'),
         recommendationRequest,
         fetch('/api/staff'),
+        recommendationMapRequest,
       ]);
 
       const inventoryPayload = inventoryRes.ok
@@ -469,6 +431,9 @@ function App() {
         setRecommendationsError('Unable to load AI recommendations right now.');
       }
       setRecommendationsLoading(false);
+      if (recommendationMapRes.ok) {
+        setRecommendationMap(await recommendationMapRes.json());
+      }
 
       if (token && currentHospital) {
         const workspaceHospitalId = currentHospital.hospitalId || currentHospital.id;
@@ -799,6 +764,27 @@ function App() {
     }
   };
 
+  const updateHospitalDistance = async (hospitalId, distance) => {
+    const numericDistance = Number(distance);
+    if (!Number.isFinite(numericDistance) || numericDistance < 0) {
+      setFeedback({ type: 'error', message: 'Distance must be a non-negative number.' });
+      return;
+    }
+
+    const response = await authFetch(`/api/hospitals/${hospitalId}/distance`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ distance: numericDistance }),
+    });
+    const result = await response.json();
+    if (response.ok) {
+      setHospitals((prev) => prev.map((hospital) => (hospital.id === hospitalId ? result : hospital)));
+      setFeedback({ type: 'success', message: `${result.name} distance set to ${result.distance} km.` });
+    } else {
+      setFeedback({ type: 'error', message: result.error || 'Failed to update distance.' });
+    }
+  };
+
   const registerHospital = async (event) => {
     event.preventDefault();
     const response = await authFetch('/api/hospitals/register', {
@@ -931,6 +917,7 @@ function App() {
                   getHospitalName={getHospitalName}
                   currentHospital={currentHospital}
                   updateHospitalEmergencyStatus={updateHospitalEmergencyStatus}
+                  updateHospitalDistance={updateHospitalDistance}
                 />
               </div>
             )}
@@ -1036,7 +1023,7 @@ function App() {
 
           <Route
             path="/ai-recommendations"
-            element={<AiRecommendationsPanel recommendations={recommendations} loading={recommendationsLoading} error={recommendationsError} />}
+            element={<AiRecommendationsPanel recommendations={recommendations} networkMap={recommendationMap} loading={recommendationsLoading} error={recommendationsError} />}
           />
 
           <Route

@@ -1,6 +1,6 @@
 const express = require('express');
 const data = require('../data');
-const { registerHospital, deleteHospitalAccount, addResourceListing, addStaffEntry, updateHospitalEmergencyStatus } = require('../utils/hospitalService');
+const { registerHospital, deleteHospitalAccount, addResourceListing, addStaffEntry, updateHospitalEmergencyStatus, updateHospitalDistance } = require('../utils/hospitalService');
 const { authMiddleware, requireAdmin, denyAdmin, hashPassword } = require('../utils/auth');
 
 const router = express.Router();
@@ -201,11 +201,18 @@ router.post('/:hospitalId/approve', authMiddleware, requireAdmin, async (req, re
 });
 
 // PATCH /api/hospitals/:hospitalId/emergency-status
-router.patch('/:hospitalId/emergency-status', authMiddleware, requireAdmin, async (req, res) => {
+// Admins may manage every hospital; a Hospital account may manage only itself.
+router.patch('/:hospitalId/emergency-status', authMiddleware, async (req, res) => {
   try {
     await data.initializeState();
     const { emergencyStatus } = req.body;
     const hospital = getHospitalById(req.params.hospitalId);
+
+    const isAdmin = req.auth?.role === 'Admin';
+    const isOwningHospital = req.auth?.role === 'Hospital' && req.auth?.id === req.params.hospitalId;
+    if (!isAdmin && !isOwningHospital) {
+      return res.status(403).json({ error: 'You may only update emergency readiness for your own hospital.' });
+    }
 
     if (!hospital) {
       return res.status(404).json({ error: 'Hospital not found' });
@@ -215,10 +222,34 @@ router.patch('/:hospitalId/emergency-status', authMiddleware, requireAdmin, asyn
       return res.status(400).json({ error: 'Invalid emergency status' });
     }
 
-    const updatedHospital = updateHospitalEmergencyStatus(req.params.hospitalId, emergencyStatus);
+    const updatedHospital = await updateHospitalEmergencyStatus(req.params.hospitalId, emergencyStatus);
     res.json(publicHospital(updatedHospital));
   } catch (error) {
     res.status(500).json({ error: error.message || 'Unable to update emergency status' });
+  }
+});
+
+// PATCH /api/hospitals/:hospitalId/distance
+// Admins may manage every hospital; a Hospital account may manage only itself.
+router.patch('/:hospitalId/distance', authMiddleware, async (req, res) => {
+  try {
+    await data.initializeState();
+    const isAdmin = req.auth?.role === 'Admin';
+    const isOwningHospital = req.auth?.role === 'Hospital' && req.auth?.id === req.params.hospitalId;
+    if (!isAdmin && !isOwningHospital) {
+      return res.status(403).json({ error: 'You may only update distance for your own hospital.' });
+    }
+
+    const distance = Number(req.body.distance);
+    if (!Number.isFinite(distance) || distance < 0) {
+      return res.status(400).json({ error: 'Distance must be a non-negative number.' });
+    }
+
+    const updatedHospital = await updateHospitalDistance(req.params.hospitalId, distance);
+    res.json(publicHospital(updatedHospital));
+  } catch (error) {
+    const status = error.message === 'Hospital not found' ? 404 : 500;
+    res.status(status).json({ error: error.message || 'Unable to update distance' });
   }
 });
 

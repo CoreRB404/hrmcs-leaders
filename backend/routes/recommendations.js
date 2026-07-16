@@ -1,8 +1,17 @@
 const express = require('express');
-const { recommendHospitals } = require('../utils/recommendation');
+const { recommendHospitals, getRecommendationNetwork } = require('../utils/recommendation');
 const { authMiddleware } = require('../utils/auth');
 
 const router = express.Router();
+
+router.get('/network/map', authMiddleware, async (req, res) => {
+  try {
+    const currentHospitalId = req.query.currentHospitalId || req.auth?.hospitalId || req.auth?.id || null;
+    res.json(await getRecommendationNetwork({ currentHospitalId }));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // GET /api/recommendations/:resourceName?
 router.get('/:resourceName?', authMiddleware, async (req, res) => {

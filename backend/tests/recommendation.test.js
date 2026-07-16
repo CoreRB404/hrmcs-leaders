@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const data = require('../data');
 const { resetDemoData } = require('../data');
 const { registerHospital } = require('../utils/hospitalService');
-const { recommendHospitals, scoreHospital } = require('../utils/recommendation');
+const { recommendHospitals, scoreHospital, getRecommendationNetwork } = require('../utils/recommendation');
 
 test('recommends closest and best-stock hospitals', async () => {
   await resetDemoData();
@@ -15,7 +15,8 @@ test('recommends closest and best-stock hospitals', async () => {
   assert.equal(results[0].resourceName, 'Blood Bags');
   assert.ok(results[0].score >= (results[1]?.score || 0));
   assert.ok(results[0].reasonBreakdown);
-  assert.deepEqual(Object.keys(results[0].reasonBreakdown).sort(), ['distance', 'emergency', 'reliability', 'staff', 'stock'].sort());
+  assert.deepEqual(Object.keys(results[0].reasonBreakdown).sort(), ['distance', 'emergency', 'reliability', 'stock'].sort());
+  assert.equal('availableStaff' in results[0], false);
 });
 
 test('returns a full ranked list instead of only the top three', async () => {
@@ -27,14 +28,16 @@ test('returns a full ranked list instead of only the top three', async () => {
   assert.ok(results.every((entry, index) => entry.rank === index + 1));
 });
 
-test('uses published inventory and total available staff counts in recommendations', async () => {
+test('uses published inventory without staff data in recommendations', async () => {
   await resetDemoData();
   const results = await recommendHospitals({ currentHospitalId: 'hospital-demo', resourceName: 'Oxygen Tanks', quantity: 2, urgency: 'Medium' });
   const recommendation = results.find((entry) => entry.id === 'hospital-central');
 
   assert.ok(recommendation, 'expected the recommendation list to include active provider hospitals');
   assert.equal(recommendation.stock, 6);
-  assert.equal(recommendation.availableStaff, 14);
+  assert.equal('availableStaff' in recommendation, false);
+  assert.equal('staff' in recommendation.reasonBreakdown, false);
+  assert.equal('staff' in recommendation.rankingBasis.weights, false);
 });
 
 test('does not rely on a hardcoded hospital id when context is missing', async () => {
@@ -67,4 +70,16 @@ test('tie-breaks equal scores by distance then stock', async () => {
   assert.equal(centralScore.distance, 8);
   assert.ok(demoScore.reasonBreakdown.distance >= 0);
   assert.ok(centralScore.reasonBreakdown.distance >= 0);
+});
+
+test('uses requester-to-provider distance and exposes the hospital network map', async () => {
+  await resetDemoData();
+  const fromNorthside = await recommendHospitals({ currentHospitalId: 'hospital-demo', resourceName: 'Portable Monitors', quantity: 2, urgency: 'High' });
+  const fromCentral = await recommendHospitals({ currentHospitalId: 'hospital-central', resourceName: 'Portable Monitors', quantity: 2, urgency: 'High' });
+  assert.equal(fromNorthside.find((entry) => entry.id === 'hospital-eastbay').distance, 6);
+  assert.equal(fromCentral.find((entry) => entry.id === 'hospital-eastbay').distance, 3);
+
+  const network = await getRecommendationNetwork({ currentHospitalId: 'hospital-demo' });
+  assert.ok(network.nodes.some((node) => node.role === 'Admin'));
+  assert.ok(network.edges.some((edge) => edge.from === 'hospital-demo' || edge.to === 'hospital-demo'));
 });

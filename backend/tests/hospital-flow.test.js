@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { resetDemoData } = require('../data');
 const data = require('../data');
-const { registerHospital, addResourceListing, createResourceRequest, respondToRequest, reviewRequestClinicalStage, approveRequest, createPatientSupportRequest, getAdminSummary } = require('../utils/hospitalService');
+const { registerHospital, addResourceListing, createResourceRequest, respondToRequest, reviewRequestClinicalStage, approveRequest, createPatientSupportRequest, getAdminSummary, prioritizeRequests } = require('../utils/hospitalService');
 
 test('integrated hospital flows: registration, listing, request lifecycle, patient-support', async () => {
   // Run full flow sequentially to avoid test-worker races
@@ -60,6 +60,7 @@ test('integrated hospital flows: registration, listing, request lifecycle, patie
   const summary = getAdminSummary();
   assert.equal(request.status, 'Pending');
   assert.equal(request.providerApproval, 'Pending');
+  assert.equal(data.getInventory().find((item) => item.id === listing.id).quantity, 40, 'request creation must not consume stock');
   assert.ok(summary.totalHospitals >= 3);
   assert.equal(summary.totalTransactions, 6);
 
@@ -90,6 +91,7 @@ test('integrated hospital flows: registration, listing, request lifecycle, patie
   });
   assert.equal(providerResponse.providerApproval, 'Approved');
   assert.equal(providerResponse.status, 'Pending');
+  assert.equal(data.getInventory().find((item) => item.id === listing.id).quantity, 30, 'provider acceptance commits stock');
 
   // admin approves and finalizes inventory
   const finalRequest = approveRequest({
@@ -116,6 +118,23 @@ test('integrated hospital flows: registration, listing, request lifecycle, patie
   assert.equal(supportRequest.status, 'Open');
   assert.equal(summary2.totalTransactions, 7);
   assert.equal(supportRequest.priority, 'High');
+});
+
+test('provider queues prioritize urgency, FIFO, and aging without hiding requests', () => {
+  const now = new Date('2026-07-16T12:00:00.000Z').getTime();
+  const requests = [
+    { id: 'low-old', providerHospitalId: 'provider-a', urgency: 'Low', status: 'Pending', type: 'Borrow', createdAt: '2026-07-14T12:00:00.000Z' },
+    { id: 'high-new', providerHospitalId: 'provider-a', urgency: 'High', status: 'Pending', type: 'Borrow', createdAt: '2026-07-16T11:00:00.000Z' },
+    { id: 'critical-new', providerHospitalId: 'provider-a', urgency: 'Critical', status: 'Pending', type: 'Borrow', createdAt: '2026-07-16T11:30:00.000Z' },
+    { id: 'other-provider', providerHospitalId: 'provider-b', urgency: 'Medium', status: 'Pending', type: 'Borrow', createdAt: '2026-07-16T10:00:00.000Z' },
+  ];
+  const prioritized = prioritizeRequests(requests, now);
+  const providerA = prioritized.filter((request) => request.providerHospitalId === 'provider-a');
+  assert.deepEqual(providerA.map((request) => request.id), ['critical-new', 'low-old', 'high-new']);
+  assert.deepEqual(providerA.map((request) => request.queuePosition), [1, 2, 3]);
+  assert.equal(providerA[1].effectiveUrgency, 'High');
+  assert.equal(prioritized.find((request) => request.id === 'other-provider').queuePosition, 1);
+  assert.equal(prioritized.length, requests.length);
 });
 
 test('clinical approval order must be followed before admin final approval', async () => {

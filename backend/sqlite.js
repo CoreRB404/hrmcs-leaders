@@ -179,6 +179,29 @@ async function initializeDb() {
       )
     `);
 
+    await runAsync(db, `
+      CREATE TABLE IF NOT EXISTS hospital_distances (
+        fromHospitalId TEXT NOT NULL,
+        toHospitalId TEXT NOT NULL,
+        distance REAL NOT NULL,
+        PRIMARY KEY (fromHospitalId, toHospitalId)
+      )
+    `);
+
+    const defaultDistances = [
+      ['hospital-admin', 'hospital-demo', 3], ['hospital-admin', 'hospital-central', 4],
+      ['hospital-admin', 'hospital-riverside', 6], ['hospital-admin', 'hospital-westbridge', 8],
+      ['hospital-admin', 'hospital-eastbay', 5], ['hospital-central', 'hospital-demo', 5],
+      ['hospital-demo', 'hospital-riverside', 4], ['hospital-demo', 'hospital-westbridge', 7],
+      ['hospital-demo', 'hospital-eastbay', 6], ['hospital-central', 'hospital-riverside', 7],
+      ['hospital-central', 'hospital-westbridge', 5], ['hospital-central', 'hospital-eastbay', 3],
+      ['hospital-riverside', 'hospital-westbridge', 4], ['hospital-eastbay', 'hospital-riverside', 8],
+      ['hospital-eastbay', 'hospital-westbridge', 6],
+    ];
+    for (const [fromHospitalId, toHospitalId, distance] of defaultDistances) {
+      await runAsync(db, `INSERT OR IGNORE INTO hospital_distances (fromHospitalId, toHospitalId, distance) VALUES (?, ?, ?)`, [fromHospitalId, toHospitalId, distance]);
+    }
+
     await closeAsync(db);
   } catch (error) {
     console.error('Failed to initialize Db', error);
@@ -528,6 +551,7 @@ function seedDefaultUsers({ force = false } = {}) {
       await runAsync(db, 'DELETE FROM staff');
       await runAsync(db, 'DELETE FROM requests');
       await runAsync(db, 'DELETE FROM notifications');
+      await runAsync(db, 'DELETE FROM hospital_distances');
 
       // Insert hospitals
       for (const hospital of hospitals) {
@@ -576,6 +600,20 @@ function seedDefaultUsers({ force = false } = {}) {
           INSERT OR REPLACE INTO notifications (id, message, severity)
           VALUES (?, ?, ?)
         `, row);
+      }
+
+      const defaultDistances = [
+        ['hospital-admin', 'hospital-demo', 3], ['hospital-admin', 'hospital-central', 4],
+        ['hospital-admin', 'hospital-riverside', 6], ['hospital-admin', 'hospital-westbridge', 8],
+        ['hospital-admin', 'hospital-eastbay', 5], ['hospital-central', 'hospital-demo', 5],
+        ['hospital-demo', 'hospital-riverside', 4], ['hospital-demo', 'hospital-westbridge', 7],
+        ['hospital-demo', 'hospital-eastbay', 6], ['hospital-central', 'hospital-riverside', 7],
+        ['hospital-central', 'hospital-westbridge', 5], ['hospital-central', 'hospital-eastbay', 3],
+        ['hospital-riverside', 'hospital-westbridge', 4], ['hospital-eastbay', 'hospital-riverside', 8],
+        ['hospital-eastbay', 'hospital-westbridge', 6],
+      ];
+      for (const row of defaultDistances) {
+        await runAsync(db, `INSERT OR REPLACE INTO hospital_distances (fromHospitalId, toHospitalId, distance) VALUES (?, ?, ?)`, row);
       }
 
       const seededRows = await allAsync(db, 'SELECT id, email, accountStatus, password, name, location, visibility, type, role, hospitalId, createdAt, emergencyStatus, capacity, availableBeds, availableIcu, availableAmbulances, distance FROM hospitals ORDER BY createdAt');
@@ -684,6 +722,16 @@ function getNotifications() {
   });
 }
 
+function getHospitalDistances() {
+  return new Promise((resolve, reject) => {
+    const db = openDb();
+    db.all('SELECT fromHospitalId, toHospitalId, distance FROM hospital_distances ORDER BY fromHospitalId, toHospitalId', (err, rows) => {
+      db.close();
+      if (err) reject(err); else resolve(rows);
+    });
+  });
+}
+
 function rememberHospitalEmail(hospital) {
   if (hospital?.email) {
     hospitalEmailCache.set(hospital.email, hospital);
@@ -729,6 +777,22 @@ async function insertHospital(hospital) {
   } catch (err) {
     try { await closeAsync(db); } catch (e) { /* ignore */ }
     console.error('Failed to persist hospital to SQLite', err);
+  }
+}
+
+async function upsertHospitalDistance(fromHospitalId, toHospitalId, distance) {
+  if (!fromHospitalId || !toHospitalId || fromHospitalId === toHospitalId) return;
+  const [fromId, toId] = [fromHospitalId, toHospitalId].sort();
+  const db = openDb();
+  try {
+    await runAsync(db, `
+      INSERT OR REPLACE INTO hospital_distances (fromHospitalId, toHospitalId, distance)
+      VALUES (?, ?, ?)
+    `, [fromId, toId, distance]);
+    await closeAsync(db);
+  } catch (err) {
+    try { await closeAsync(db); } catch (e) { /* ignore */ }
+    throw err;
   }
 }
 
@@ -813,6 +877,7 @@ async function deleteHospitalById(hospitalId) {
     await runAsync(db, 'DELETE FROM inventory WHERE hospitalId = ?', [hospitalId]);
     await runAsync(db, 'DELETE FROM staff WHERE hospitalId = ?', [hospitalId]);
     await runAsync(db, 'DELETE FROM requests WHERE requesterHospitalId = ? OR providerHospitalId = ?', [hospitalId, hospitalId]);
+    await runAsync(db, 'DELETE FROM hospital_distances WHERE fromHospitalId = ? OR toHospitalId = ?', [hospitalId, hospitalId]);
     for (const [email, hospital] of hospitalEmailCache.entries()) {
       if (hospital.id === hospitalId || hospital.hospitalId === hospitalId) {
         hospitalEmailCache.delete(email);
@@ -907,9 +972,11 @@ module.exports = {
   getStaff,
   getRequests,
   getNotifications,
+  getHospitalDistances,
   getHospitalByEmail,
   // Write-through persistence
   insertHospital,
+  upsertHospitalDistance,
   upsertInventoryItem,
   insertStaffEntry,
   updateHospitalStatus,

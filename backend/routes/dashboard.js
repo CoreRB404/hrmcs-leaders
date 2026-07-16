@@ -1,6 +1,6 @@
 const express = require('express');
 const data = require('../data');
-const { getAdminSummary } = require('../utils/hospitalService');
+const { getAdminSummary, prioritizeRequests } = require('../utils/hospitalService');
 const { authMiddleware, requireAdmin } = require('../utils/auth');
 
 const router = express.Router();
@@ -44,7 +44,7 @@ async function getHospitalDashboard(req, res) {
     }
 
     const hospitalInventory = data.getInventory().filter((item) => item.hospitalId === hospital.id);
-    const hospitalRequests = data.getRequests().filter((request) => request.requesterHospitalId === hospital.id || request.providerHospitalId === hospital.id || request.hospitalId === hospital.id);
+    const hospitalRequests = prioritizeRequests(data.getRequests()).filter((request) => request.requesterHospitalId === hospital.id || request.providerHospitalId === hospital.id || request.hospitalId === hospital.id);
     const hospitalStaff = data.getStaff().filter((staff) => staff.hospitalId === hospital.id);
     const { password, ...publicHospital } = hospital;
     res.json({ hospital: publicHospital, hospitalInventory, hospitalRequests, hospitalStaff });

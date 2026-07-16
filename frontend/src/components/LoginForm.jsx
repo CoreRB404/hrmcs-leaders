@@ -50,9 +50,7 @@ function LoginForm({ loginForm, setLoginForm, handleLogin }) {
           </button>
         </div>
       </div>
-      <p className="subhead" style={{ marginTop: -4, marginBottom: 0, fontSize: '0.82rem' }}>
-        Sign in with the account that matches your role. Pharmacist and doctor review buttons are shown only after you log in with the correct role-based account.
-      </p>
+     
       <button type="submit" id="login-submit">Sign in</button>
     </form>
   );

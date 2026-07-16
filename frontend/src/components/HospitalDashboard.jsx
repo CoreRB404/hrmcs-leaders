@@ -97,7 +97,10 @@ function HospitalDashboard({ hospitalDashboard, currentHospital, respondToReques
                           : 'Related request'}
                     </span>
                     <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>{request.requestType || request.type} · {request.status}</span>
+                    {request.queuePosition ? <span className="badge pending">Queue #{request.queuePosition} of {request.queueSize}</span> : null}
+                    {request.urgency ? <span className={`badge urgency-${request.urgency.toLowerCase()}`}>{request.urgency} urgency</span> : null}
                   </div>
+                  {request.reason ? <div style={{ fontSize: '0.76rem', color: 'var(--text-secondary)', marginTop: 5 }}>{request.reason}</div> : null}
                 </div>
                 {currentHospital?.role === 'Pharmacist' && request.providerHospitalId === workspaceHospitalId && request.pharmacistApproval === 'Pending' ? (
                   <div style={{ display: 'flex', gap: 8 }}>
