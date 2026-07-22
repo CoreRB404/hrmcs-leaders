@@ -1,6 +1,7 @@
 import React from 'react';
+import InventoryItemRow from './InventoryItemRow';
 
-function HospitalDashboard({ hospitalDashboard, currentHospital, respondToRequest, reviewClinicalRequest, getHospitalName }) {
+function HospitalDashboard({ hospitalDashboard, currentHospital, respondToRequest, reviewClinicalRequest, getHospitalName, editInventoryItem, setInventoryItemStatus, deleteInventoryItem }) {
   if (!hospitalDashboard) {
     return null;
   }
@@ -54,20 +55,14 @@ function HospitalDashboard({ hospitalDashboard, currentHospital, respondToReques
           </div>
           <div className="stack">
             {hospitalDashboard.hospitalInventory.length ? hospitalDashboard.hospitalInventory.map((item) => (
-              <div key={item.id} className={`list-item inventory-summary-row ${((item.availableQuantity ?? item.quantity) <= 0) ? 'critical' : ((item.availableQuantity ?? item.quantity) <= 5 ? 'warning' : '')}`}>
-                <div>
-                  <div className="title-row">
-                    <strong>{item.resourceName || item.item}</strong>
-                    {((item.availableQuantity ?? item.quantity) <= 0) ? <span className="attention-label critical">● Critical</span> : ((item.availableQuantity ?? item.quantity) <= 5 ? <span className="attention-label warning">● Low</span> : null)}
-                  </div>
-                  <div className="quantity-meta">
-                    <span className="quantity-pill published">Published {item.publishedQuantity ?? item.quantity}</span>
-                    <span className="quantity-pill available">Available {item.availableQuantity ?? item.quantity}</span>
-                    <span className="quantity-pill lent">Lent {item.lentQuantity || 0}</span>
-                  </div>
-                </div>
-                <strong className="quantity-highlight">{item.availableQuantity ?? item.quantity} avail</strong>
-              </div>
+              <InventoryItemRow
+                key={item.id}
+                item={item}
+                canEdit={isHospitalRole}
+                editInventoryItem={editInventoryItem}
+                setInventoryItemStatus={setInventoryItemStatus}
+                deleteInventoryItem={deleteInventoryItem}
+              />
             )) : (
               <div className="empty-state">
                 <div className="empty-state-icon">📦</div>

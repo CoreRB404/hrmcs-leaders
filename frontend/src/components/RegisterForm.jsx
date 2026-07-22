@@ -111,19 +111,6 @@ function RegisterForm({ registerForm, setRegisterForm, registerHospital, generat
         </div>
       </div>
       <div className="field">
-        <label htmlFor="reg-role">Account role</label>
-        <select
-          id="reg-role"
-          value={registerForm.role || 'Hospital'}
-          onChange={(e) => setRegisterForm({ ...registerForm, role: e.target.value })}
-        >
-          <option value="Hospital">Hospital</option>
-          <option value="Pharmacist">Pharmacist</option>
-          <option value="Doctor">Doctor</option>
-          <option value="Admin">Admin</option>
-        </select>
-      </div>
-      <div className="field">
         <label htmlFor="reg-emergency-status">Emergency status</label>
         <select
           id="reg-emergency-status"

@@ -2,8 +2,8 @@ import React from 'react';
 import Card from './Card';
 
 function DashboardSummary({ currentHospital, isHospitalRole, isAdmin, activeAdminSection, hospitalWorkspaceStats, dashboard }) {
-  const cardIcons = ['🏥', '📦', '⚠', '👥', '📋', '🚨'];
-  const cardTones = ['', 'accent', 'warning', 'success', '', 'danger'];
+  const cardIcons = ['🏥', '📦', '⚠', '📋', '🚨'];
+  const cardTones = ['', 'accent', 'warning', '', 'danger'];
 
   return (
     <>
@@ -39,9 +39,8 @@ function DashboardSummary({ currentHospital, isHospitalRole, isAdmin, activeAdmi
             <Card title="Hospitals" value={dashboard.totalHospitals} icon={cardIcons[0]} tone={cardTones[0]} highlight />
             <Card title="Inventory Items" value={dashboard.totalInventoryItems} icon={cardIcons[1]} tone={cardTones[1]} />
             <Card title="Critical Shortages" value={dashboard.criticalShortages.length} icon={cardIcons[2]} tone={cardTones[2]} />
-            <Card title="Available Staff" value={dashboard.availableStaffCount} icon={cardIcons[3]} tone={cardTones[3]} />
-            <Card title="Pending Requests" value={dashboard.pendingRequests} icon={cardIcons[4]} tone={cardTones[4]} />
-            <Card title="Emergency Alerts" value={dashboard.emergencyAlerts} icon={cardIcons[5]} tone={cardTones[5]} />
+            <Card title="Pending Requests" value={dashboard.pendingRequests} icon={cardIcons[3]} tone={cardTones[3]} />
+            <Card title="Emergency Alerts" value={dashboard.emergencyAlerts} icon={cardIcons[4]} tone={cardTones[4]} />
           </>
         )}
       </div>

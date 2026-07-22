@@ -90,7 +90,7 @@ function NetworkAvailability({
           </div>
           <div className="inventory-list">
             {filteredInventory.length ? filteredInventory.map((item) => {
-              const displayQuantity = item.publishedQuantity ?? item.availableQuantity ?? item.quantity;
+              const displayQuantity = item.availableQuantity ?? item.quantity ?? item.publishedQuantity;
               return (
                 <div key={item.id} className={`inventory-item ${selectedSupplyId === item.id ? 'selected' : ''}`} onClick={() => currentHospital?.role !== 'Admin' && selectSupply(item)} style={{ cursor: currentHospital?.role === 'Admin' ? 'default' : 'pointer' }}>
                   <div>

@@ -27,7 +27,7 @@ function verifyToken(token) {
   }
 }
 
-function authMiddleware(req, res, next) {
+async function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
   const payload = verifyToken(token);
@@ -36,8 +36,24 @@ function authMiddleware(req, res, next) {
     return res.status(401).json({ error: 'Authentication required' });
   }
 
-  req.auth = payload;
-  next();
+  try {
+    const data = require('../data');
+    await data.initializeState();
+    const account = data.getHospitals().find((entry) => entry.id === payload.id);
+    const accountHospitalId = account?.hospitalId || account?.id;
+    const tokenHospitalId = payload.hospitalId || payload.id;
+    if (!account
+      || account.accountStatus !== 'Active'
+      || (account.role || 'Hospital') !== payload.role
+      || accountHospitalId !== tokenHospitalId) {
+      return res.status(401).json({ error: 'Session is no longer active' });
+    }
+
+    req.auth = payload;
+    return next();
+  } catch (error) {
+    return res.status(500).json({ error: 'Unable to validate session' });
+  }
 }
 
 function requireAdmin(req, res, next) {

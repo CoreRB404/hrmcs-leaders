@@ -114,8 +114,8 @@ router.post('/reviewer-login', authMiddleware, async (req, res) => {
 router.patch('/password', authMiddleware, async (req, res) => {
   try {
     await data.initializeState();
-    if (!['Doctor', 'Pharmacist'].includes(req.auth.role)) {
-      return res.status(403).json({ error: 'Reviewer account required' });
+    if (!['Hospital', 'Doctor', 'Pharmacist'].includes(req.auth.role)) {
+      return res.status(403).json({ error: 'Hospital or reviewer account required' });
     }
 
     const account = data.getHospitals().find((entry) => entry.id === req.auth.id);

@@ -12,7 +12,6 @@ import HospitalDirectory from './components/HospitalDirectory';
 import NotificationsPanel from './components/NotificationsPanel';
 import NetworkAvailability from './components/NetworkAvailability';
 import ResourceActions from './components/ResourceActions';
-import PatientSupportPanel from './components/PatientSupportPanel';
 import HospitalDashboard from './components/HospitalDashboard';
 import RequestFiltersPanel from './components/RequestFiltersPanel';
 import ResourceRequestList from './components/ResourceRequestList';
@@ -28,7 +27,6 @@ function App() {
     totalHospitals: 0,
     totalInventoryItems: 0,
     criticalShortages: [],
-    availableStaffCount: 0,
     pendingRequests: 0,
     emergencyAlerts: 0,
   };
@@ -45,12 +43,9 @@ function App() {
   const [recommendationsError, setRecommendationsError] = useState('');
   const [recommendationMap, setRecommendationMap] = useState({ nodes: [], edges: [], currentHospitalId: null });
   const [networkInventory, setNetworkInventory] = useState([]);
-  const [networkStaff, setNetworkStaff] = useState([]);
   const [networkSearch, setNetworkSearch] = useState('');
   const [inventorySort, setInventorySort] = useState('quantity');
-  const [staffSort, setStaffSort] = useState('available');
   const [inventoryAvailabilityFilter, setInventoryAvailabilityFilter] = useState('All');
-  const [staffStatusFilter, setStaffStatusFilter] = useState('All');
   const [selectedSupplyId, setSelectedSupplyId] = useState(null);
   const [selectedProviderId, setSelectedProviderId] = useState('');
   const [hospitalDashboard, setHospitalDashboard] = useState(null);
@@ -65,12 +60,10 @@ function App() {
   const [loginForm, setLoginForm] = useState({ email: 'admin@hrmcs.org', password: 'Admin@1234' });
   const [listingForm, setListingForm] = useState({ resourceType: 'Supply', resourceName: '', quantity: 10, availableForBorrow: true, availableForOrder: true });
   const [requestForm, setRequestForm] = useState({ providerHospitalId: '', resourceName: '', quantity: 5, requestType: 'Borrow', urgency: 'High', notes: '' });
-  const [supportForm, setSupportForm] = useState({ patientType: 'ICU', need: '', priority: 'High', notes: '' });
   const [pendingHospitals, setPendingHospitals] = useState([]);
   const [reviewerAccounts, setReviewerAccounts] = useState([]);
   const [registerForm, setRegisterForm] = useState({ name: '', location: '', email: '', password: '', visibility: 'Public', type: 'General', emergencyStatus: 'Medium' });
   const [generatedReviewerCredentials, setGeneratedReviewerCredentials] = useState(null);
-  const [staffForm, setStaffForm] = useState({ role: 'Nurse', status: 'Available', count: 5 });
   const [feedback, setFeedback] = useState({ type: '', message: '' });
   const [adminRequestStatusFilter, setAdminRequestStatusFilter] = useState('All');
   const [networkLocationFilter, setNetworkLocationFilter] = useState('All');
@@ -97,7 +90,6 @@ function App() {
     'access-account': '/access-account',
     'hospital-dashboard': '/hospital-dashboard',
     'resource-actions': '/resource-actions',
-    'patient-support': '/patient-support',
   };
 
   const pathToSection = Object.keys(sectionToPath).reduce((acc, sectionId) => {
@@ -208,10 +200,32 @@ function App() {
 
   const getHospitalName = (hospitalId) => hospitals.find((hospital) => hospital.id === hospitalId)?.name || hospitalId;
 
-  const selectedNetworkItem = [...networkInventory, ...networkStaff].find((item) => item.id === selectedSupplyId);
-  const activeProviders = hospitals.filter((hospital) => hospital.id !== currentHospital?.id && hospital.accountStatus === 'Active' && hospital.role === 'Hospital');
+  const selectedNetworkItem = networkInventory.find((item) => item.id === selectedSupplyId);
+  const requestableInventory = networkInventory.filter((item) => {
+    const available = Number(item.availableQuantity ?? item.quantity ?? 0);
+    const supportsRequestType = requestForm.requestType === 'Order' ? item.availableForOrder : item.availableForBorrow;
+    return item.hospitalId !== currentHospital?.id && available > 0 && supportsRequestType;
+  });
+  const requestableProviderIds = new Set(requestableInventory.map((item) => item.hospitalId));
+  const activeProviders = hospitals.filter((hospital) => hospital.id !== currentHospital?.id
+    && hospital.accountStatus === 'Active'
+    && hospital.role === 'Hospital'
+    && requestableProviderIds.has(hospital.id));
+  const providerPublishedSupplies = Object.values(requestableInventory
+    .filter((item) => item.hospitalId === requestForm.providerHospitalId)
+    .reduce((supplies, item) => {
+      const key = String(item.resourceName || '').trim().toLowerCase();
+      const available = Number(item.availableQuantity ?? item.quantity ?? 0);
+      if (!supplies[key]) supplies[key] = { resourceName: item.resourceName, availableQuantity: 0 };
+      supplies[key].availableQuantity += available;
+      return supplies;
+    }, {}));
+  const selectedPublishedSupply = providerPublishedSupplies.find((item) => item.resourceName === requestForm.resourceName);
   const selectedProvider = hospitals.find((hospital) => hospital.id === requestForm.providerHospitalId);
-  const isRequestSubmitDisabled = !requestForm.providerHospitalId || !requestForm.resourceName || requestForm.quantity <= 0;
+  const isRequestSubmitDisabled = !requestForm.providerHospitalId
+    || !selectedPublishedSupply
+    || requestForm.quantity <= 0
+    || requestForm.quantity > selectedPublishedSupply.availableQuantity;
   const filteredRequests = requests
     .filter((request) => {
       if (!requestStatusFilter || requestStatusFilter === 'All') return true;
@@ -264,34 +278,24 @@ function App() {
         ...((isHospitalRole || isReviewerRole) ? [{ id: 'hospital-dashboard', label: 'My dashboard', hint: 'Inventory & requests', icon: '◫' }] : []),
         { id: 'network-availability', label: 'Network availability', hint: 'Supply view', icon: '⬢' },
         { id: 'resource-actions', label: 'Resource actions', hint: 'Listings & requests', icon: '⤴' },
-        { id: 'patient-support', label: 'Patient support', hint: 'Coordination', icon: '✚' },
         { id: 'ai-recommendations', label: 'AI recommendations', hint: 'Smart suggestions', icon: '◌' },
         ...(isHospitalRole ? [{ id: 'access-account', label: 'Reviewer access', hint: 'Doctor / Pharmacist', icon: '⟡' }] : []),
       ];
 
   const selectSupply = (item) => {
+    const availableQuantity = Number(item.availableQuantity ?? item.quantity ?? 0);
+    const requestType = item.availableForBorrow ? 'Borrow' : 'Order';
     setSelectedSupplyId(item.id);
     setSelectedProviderId(item.hospitalId);
     setRequestForm({
       ...requestForm,
       providerHospitalId: item.hospitalId,
       resourceName: item.resourceName,
-      quantity: item.quantity || requestForm.quantity,
-      requestType: 'Borrow',
+      quantity: Math.min(Math.max(1, Number(requestForm.quantity) || 1), availableQuantity),
+      requestType,
     });
     setActiveAdminSection('resource-actions');
     setFeedback({ type: 'success', message: `Prefilled request for ${item.resourceName}. Please review and send.` });
-  };
-
-  const selectStaffProvider = (item) => {
-    setSelectedSupplyId(item.id);
-    setSelectedProviderId(item.hospitalId);
-    setSupportForm({
-      ...supportForm,
-      need: `${item.role} staff from ${getHospitalName(item.hospitalId)}`,
-    });
-    setActiveAdminSection('patient-support');
-    setFeedback({ type: 'success', message: `Prefilled patient support request for ${item.role}. Please review and send.` });
   };
 
   const filterNetworkInventory = () => {
@@ -321,45 +325,15 @@ function App() {
         if (inventorySort === 'name') {
           return a.resourceName.localeCompare(b.resourceName);
         }
-        const aQuantity = a.publishedQuantity ?? a.availableQuantity ?? a.quantity;
-        const bQuantity = b.publishedQuantity ?? b.availableQuantity ?? b.quantity;
+        const aQuantity = a.availableQuantity ?? a.quantity ?? a.publishedQuantity;
+        const bQuantity = b.availableQuantity ?? b.quantity ?? b.publishedQuantity;
         return bQuantity - aQuantity;
-      });
-  };
-
-  const filterNetworkStaff = () => {
-    const currentHospitalId = currentHospital?.id;
-    return networkStaff
-      .filter((item) => !currentHospitalId || item.hospitalId !== currentHospitalId)
-      .filter((item) => {
-        const query = networkSearch.toLowerCase();
-        const provider = hospitals.find((hospital) => hospital.id === item.hospitalId);
-        return !query || [item.role, item.status, getHospitalName(item.hospitalId), provider?.location, provider?.type].join(' ').toLowerCase().includes(query);
-      })
-      .filter((item) => {
-        if (networkLocationFilter !== 'All') {
-          const provider = hospitals.find((hospital) => hospital.id === item.hospitalId);
-          if (!provider || provider.location !== networkLocationFilter) return false;
-        }
-        if (networkTypeFilter !== 'All') {
-          const provider = hospitals.find((hospital) => hospital.id === item.hospitalId);
-          if (!provider || provider.type !== networkTypeFilter) return false;
-        }
-        return staffStatusFilter === 'All' || item.status === staffStatusFilter;
-      })
-      .sort((a, b) => {
-        if (staffSort === 'role') {
-          return a.role.localeCompare(b.role);
-        }
-        const aCount = a.publishedCount ?? a.availableCount ?? a.count;
-        const bCount = b.publishedCount ?? b.availableCount ?? b.count;
-        return bCount - aCount;
       });
   };
 
   const loadData = async () => {
     try {
-      const inventoryRes = await fetch('/api/inventory');
+      const inventoryRes = await authFetch('/api/inventory');
       const inventoryData = inventoryRes.ok ? await inventoryRes.json() : [];
       const recommendationResource = requestForm.resourceName || '';
       const recommendationQuantity = Number(requestForm.quantity) || 10;
@@ -370,13 +344,12 @@ function App() {
       );
       const recommendationMapRequest = authFetch(`/api/recommendations/network/map?currentHospitalId=${encodeURIComponent(recommendationRequesterId)}`);
 
-      const [dashboardRes, requestsRes, hospitalsRes, notificationsRes, recommendationsRes, staffRes, recommendationMapRes] = await Promise.all([
+      const [dashboardRes, requestsRes, hospitalsRes, notificationsRes, recommendationsRes, recommendationMapRes] = await Promise.all([
         authFetch('/api/dashboard'),
         authFetch('/api/requests'),
         authFetch(`/api/hospitals?search=${encodeURIComponent(hospitalSearch)}`),
         authFetch('/api/notifications'),
         recommendationRequest,
-        fetch('/api/staff'),
         recommendationMapRequest,
       ]);
 
@@ -407,18 +380,6 @@ function App() {
 
       if (inventoryRes.ok) {
         setNetworkInventory(inventoryPayload);
-      }
-
-      const staffData = staffRes.ok
-        ? (await staffRes.json()).map((item) => ({
-            ...item,
-            publishedCount: item.publishedCount ?? item.availableCount ?? item.count ?? 0,
-            availableCount: item.availableCount ?? item.publishedCount ?? item.count ?? 0,
-            count: item.count ?? item.publishedCount ?? item.availableCount ?? 0,
-          }))
-        : [];
-      if (staffRes.ok) {
-        setNetworkStaff(staffData);
       }
 
       setRecommendationsLoading(true);
@@ -484,6 +445,21 @@ function App() {
       await loadData();
     } else {
       setFeedback({ type: 'error', message: result.error || 'Approval failed.' });
+    }
+  };
+
+  const reviewAdminRequest = async (id, decision) => {
+    const response = await authFetch(`/api/requests/${id}/admin-review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision, notes: `${decision} by system admin` }),
+    });
+    const result = await response.json();
+    if (response.ok) {
+      setFeedback({ type: 'success', message: `Admin ${decision} recorded for request ${id}.` });
+      await loadData();
+    } else {
+      setFeedback({ type: 'error', message: result.error || 'Admin review failed.' });
     }
   };
 
@@ -636,6 +612,53 @@ function App() {
     loadData();
   };
 
+  const editInventoryItem = async (itemId, updates) => {
+    const response = await authFetch(`/api/inventory/${itemId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      setFeedback({ type: 'error', message: result.error || 'Inventory update failed.' });
+      return false;
+    }
+    setFeedback({ type: 'success', message: `${result.resourceName} inventory updated across the network.` });
+    await loadData();
+    return true;
+  };
+
+  const setInventoryItemStatus = async (item, status) => {
+    const action = status === 'Inactive' ? 'deactivate' : 'reactivate';
+    if (!window.confirm(`Are you sure you want to ${action} ${item.resourceName}?`)) return false;
+    const response = await authFetch(`/api/inventory/${item.id}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      setFeedback({ type: 'error', message: result.error || `Unable to ${action} listing.` });
+      return false;
+    }
+    setFeedback({ type: 'success', message: `${result.resourceName} ${status === 'Inactive' ? 'removed from' : 'restored to'} Network Availability.` });
+    await loadData();
+    return true;
+  };
+
+  const deleteInventoryItem = async (item) => {
+    if (!window.confirm(`Permanently delete ${item.resourceName}? Listings with request history cannot be deleted.`)) return false;
+    const response = await authFetch(`/api/inventory/${item.id}`, { method: 'DELETE' });
+    const result = await response.json();
+    if (!response.ok) {
+      setFeedback({ type: 'error', message: result.error || 'Inventory deletion failed.' });
+      return false;
+    }
+    setFeedback({ type: 'success', message: `${item.resourceName} permanently deleted.` });
+    await loadData();
+    return true;
+  };
+
   const createRequest = async (event) => {
     event.preventDefault();
     const response = await authFetch('/api/requests', {
@@ -650,23 +673,6 @@ function App() {
       setFeedback({ type: 'success', message: `Requested ${result.request.resourceName}` });
     } else {
       setFeedback({ type: 'error', message: result.error || 'Request failed.' });
-    }
-    loadData();
-  };
-
-  const submitStaffUpdate = async (event) => {
-    event.preventDefault();
-    const response = await authFetch('/api/hospitals/staff', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(staffForm),
-    });
-    const result = await response.json();
-    if (response.ok) {
-      setStaffForm({ role: 'Nurse', status: 'Available', count: 5 });
-      setFeedback({ type: 'success', message: `Staff updated: ${result.count} ${result.role}` });
-    } else {
-      setFeedback({ type: 'error', message: result.error || 'Staff update failed.' });
     }
     loadData();
   };
@@ -695,20 +701,6 @@ function App() {
       message: response.ok ? `${reviewerRole} ${decision} recorded for request ${requestId}.` : result.error || 'Clinical review failed.',
     });
     await loadData();
-  };
-
-  const createSupportRequest = async (event) => {
-    event.preventDefault();
-    const response = await authFetch('/api/patient-support', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...supportForm, hospitalId: currentHospital?.id, providerHospitalId: selectedProviderId || null }),
-    });
-    const result = await response.json();
-    setSupportForm({ patientType: 'ICU', need: '', priority: 'High', notes: '' });
-    setSelectedProviderId('');
-    setFeedback({ type: response.ok ? 'success' : 'error', message: response.ok ? `Support request logged for ${result.need}` : result.error || 'Support request failed.' });
-    loadData();
   };
 
   const approveHospital = async (hospitalId) => {
@@ -780,6 +772,7 @@ function App() {
     if (response.ok) {
       setHospitals((prev) => prev.map((hospital) => (hospital.id === hospitalId ? result : hospital)));
       setFeedback({ type: 'success', message: `${result.name} distance set to ${result.distance} km.` });
+      await loadData();
     } else {
       setFeedback({ type: 'error', message: result.error || 'Failed to update distance.' });
     }
@@ -901,6 +894,9 @@ function App() {
                   respondToRequest={respondToRequest}
                   reviewClinicalRequest={reviewClinicalRequest}
                   getHospitalName={getHospitalName}
+                  editInventoryItem={editInventoryItem}
+                  setInventoryItemStatus={setInventoryItemStatus}
+                  deleteInventoryItem={deleteInventoryItem}
                 />
               </>
             ) : <Navigate to="/network-availability" replace />}
@@ -961,31 +957,16 @@ function App() {
                   listingForm={listingForm}
                   setListingForm={setListingForm}
                   createListing={createListing}
-                  staffForm={staffForm}
-                  setStaffForm={setStaffForm}
-                  submitStaffUpdate={submitStaffUpdate}
                   requestForm={requestForm}
                   setRequestForm={setRequestForm}
                   activeProviders={activeProviders}
                   createRequest={createRequest}
                   selectedProvider={selectedProvider}
+                  providerPublishedSupplies={providerPublishedSupplies}
+                  selectedPublishedSupply={selectedPublishedSupply}
                   isRequestSubmitDisabled={isRequestSubmitDisabled}
                 />
               </>
-            )}
-          />
-
-          <Route
-            path="/patient-support"
-            element={(
-              <PatientSupportPanel
-                currentHospital={currentHospital}
-                supportForm={supportForm}
-                setSupportForm={setSupportForm}
-                createSupportRequest={createSupportRequest}
-                selectedProvider={selectedProvider}
-                clearSelectedProvider={() => { setSelectedProviderId(''); setSelectedSupplyId(null); }}
-              />
             )}
           />
 
@@ -1003,6 +984,7 @@ function App() {
                 approveHospital={approveHospital}
                 deleteHospital={deleteHospital}
                 approve={approve}
+                reviewAdminRequest={reviewAdminRequest}
                 getHospitalName={getHospitalName}
               />
             ) : <Navigate to="/system-dashboard" replace />}

@@ -2,9 +2,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { resetDemoData } = require('../data');
 const data = require('../data');
-const { registerHospital, addResourceListing, createResourceRequest, respondToRequest, reviewRequestClinicalStage, approveRequest, createPatientSupportRequest, getAdminSummary, prioritizeRequests } = require('../utils/hospitalService');
+const { registerHospital, addResourceListing, createResourceRequest, respondToRequest, reviewRequestClinicalStage, approveRequest, reviewAdminRequest, getAdminSummary, prioritizeRequests } = require('../utils/hospitalService');
 
-test('integrated hospital flows: registration, listing, request lifecycle, patient-support', async () => {
+test('integrated supply flow: registration, listing, and request lifecycle', async () => {
   // Run full flow sequentially to avoid test-worker races
   await resetDemoData();
 
@@ -49,7 +49,7 @@ test('integrated hospital flows: registration, listing, request lifecycle, patie
   assert.equal(listing.lentQuantity, 0);
 
   const request = createResourceRequest({
-    requesterHospitalId: 'hospital-a',
+    requesterHospitalId: 'hospital-demo',
     providerHospitalId: hospital.id,
     resourceName: 'Oxygen Tanks',
     quantity: 10,
@@ -91,7 +91,7 @@ test('integrated hospital flows: registration, listing, request lifecycle, patie
   });
   assert.equal(providerResponse.providerApproval, 'Approved');
   assert.equal(providerResponse.status, 'Pending');
-  assert.equal(data.getInventory().find((item) => item.id === listing.id).quantity, 30, 'provider acceptance commits stock');
+  assert.equal(data.getInventory().find((item) => item.id === listing.id).quantity, 40, 'stock remains unchanged until final admin approval');
 
   // admin approves and finalizes inventory
   const finalRequest = approveRequest({
@@ -106,18 +106,27 @@ test('integrated hospital flows: registration, listing, request lifecycle, patie
   assert.equal(inventoryItem.availableQuantity, 30);
   assert.equal(inventoryItem.lentQuantity, 10);
 
-  // patient-support
-  const supportRequest = createPatientSupportRequest({
-    hospitalId: 'hospital-a',
-    patientType: 'ICU',
-    need: 'Ventilator support',
-    priority: 'High',
-    notes: 'Need urgent transfer support',
+});
+
+test('admin can reject a fully reviewed request without consuming stock', async () => {
+  await resetDemoData();
+  const before = data.getInventory().find((item) => item.hospitalId === 'hospital-central' && item.resourceName === 'Ventilators').availableQuantity;
+  const request = createResourceRequest({
+    requesterHospitalId: 'hospital-demo',
+    providerHospitalId: 'hospital-central',
+    resourceName: 'Ventilators',
+    quantity: 2,
+    requestType: 'Borrow',
   });
-  const summary2 = getAdminSummary();
-  assert.equal(supportRequest.status, 'Open');
-  assert.equal(summary2.totalTransactions, 7);
-  assert.equal(supportRequest.priority, 'High');
+
+  reviewRequestClinicalStage({ requestId: request.id, reviewerHospitalId: 'hospital-central', reviewerRole: 'Pharmacist', decision: 'approve' });
+  reviewRequestClinicalStage({ requestId: request.id, reviewerHospitalId: 'hospital-central', reviewerRole: 'Doctor', decision: 'approve' });
+  respondToRequest({ requestId: request.id, responderHospitalId: 'hospital-central', response: 'approve' });
+  const rejected = reviewAdminRequest({ requestId: request.id, approverHospitalId: 'hospital-admin', decision: 'reject', notes: 'Final review declined' });
+
+  assert.equal(rejected.status, 'Rejected');
+  assert.equal(rejected.history.at(-1).status, 'AdminRejected');
+  assert.equal(data.getInventory().find((item) => item.hospitalId === 'hospital-central' && item.resourceName === 'Ventilators').availableQuantity, before);
 });
 
 test('provider queues prioritize urgency, FIFO, and aging without hiding requests', () => {
@@ -213,4 +222,42 @@ test('clinical approval order must be followed before admin final approval', asy
     requestId: request.id,
     approverHospitalId: 'hospital-admin',
   }), /Hospital approval must be completed before admin approval/);
+});
+
+test('requests must match the provider published supply, mode, and available quantity', async () => {
+  await resetDemoData();
+
+  assert.throws(() => createResourceRequest({
+    requesterHospitalId: 'hospital-demo',
+    providerHospitalId: 'hospital-central',
+    resourceName: 'Random Unpublished Supply',
+    quantity: 1,
+    requestType: 'Borrow',
+  }), /has not published this supply/);
+
+  assert.throws(() => createResourceRequest({
+    requesterHospitalId: 'hospital-demo',
+    providerHospitalId: 'hospital-central',
+    resourceName: 'Ventilators',
+    quantity: 7,
+    requestType: 'Borrow',
+  }), /Only 6 units are currently available/);
+
+  assert.throws(() => createResourceRequest({
+    requesterHospitalId: 'hospital-demo',
+    providerHospitalId: 'hospital-eastbay',
+    resourceName: 'Defibrillators',
+    quantity: 1,
+    requestType: 'Order',
+  }), /not published for ordering/);
+
+  const validRequest = createResourceRequest({
+    requesterHospitalId: 'hospital-demo',
+    providerHospitalId: 'hospital-central',
+    resourceName: 'ventilators',
+    quantity: 2,
+    requestType: 'Borrow',
+  });
+  assert.equal(validRequest.resourceName, 'Ventilators');
+  assert.equal(validRequest.quantity, 2);
 });

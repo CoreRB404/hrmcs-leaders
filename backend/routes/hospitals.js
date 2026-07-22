@@ -1,7 +1,7 @@
 const express = require('express');
 const data = require('../data');
-const { registerHospital, deleteHospitalAccount, addResourceListing, addStaffEntry, updateHospitalEmergencyStatus, updateHospitalDistance } = require('../utils/hospitalService');
-const { authMiddleware, requireAdmin, denyAdmin, hashPassword } = require('../utils/auth');
+const { registerHospital, deleteHospitalAccount, addResourceListing, updateHospitalEmergencyStatus, updateHospitalDistance } = require('../utils/hospitalService');
+const { authMiddleware, requireAdmin, requireRole, hashPassword } = require('../utils/auth');
 
 const router = express.Router();
 
@@ -20,11 +20,11 @@ const publicReviewer = (account) => ({
 const publicHospital = ({ password, ...hospital }) => hospital;
 
 // GET /api/hospitals
-router.get('/', async (req, res) => {
+router.get('/', authMiddleware, async (req, res) => {
   try {
     await data.initializeState();
     const search = (req.query.search || '').toLowerCase();
-    const hospitals = data.getHospitals().filter((hospital) => hospital.role === 'Hospital').filter((hospital) => {
+    const hospitals = data.getHospitals().filter((hospital) => hospital.role === 'Hospital' && hospital.accountStatus === 'Active').filter((hospital) => {
       if (!search) return true;
       return [hospital.name, hospital.location, hospital.type, hospital.visibility].some((value) => value.toLowerCase().includes(search));
     });
@@ -131,11 +131,12 @@ router.post('/register', async (req, res) => {
 });
 
 // POST /api/hospitals/listing
-router.post('/listing', authMiddleware, denyAdmin, async (req, res) => {
+router.post('/listing', authMiddleware, requireRole('Hospital'), async (req, res) => {
   try {
     await data.initializeState();
-    const { hospitalId, resourceType, resourceName, quantity } = req.body;
-    if (!hospitalId || !resourceName || !quantity || quantity <= 0) {
+    const hospitalId = req.auth.id;
+    const { resourceName, quantity } = req.body;
+    if (!resourceName || !Number.isInteger(Number(quantity)) || Number(quantity) <= 0) {
       return res.status(400).json({ error: 'Hospital listings require a valid hospital, resource name, and positive quantity.' });
     }
 
@@ -144,22 +145,10 @@ router.post('/listing', authMiddleware, denyAdmin, async (req, res) => {
       return res.status(400).json({ error: 'Only active hospitals may publish listings.' });
     }
 
-    const listing = addResourceListing(req.body);
+    const listing = addResourceListing({ ...req.body, hospitalId });
     res.status(201).json(listing);
   } catch (error) {
-    res.status(500).json({ error: 'Unable to create listing' });
-  }
-});
-
-// POST /api/hospitals/staff
-router.post('/staff', authMiddleware, denyAdmin, async (req, res) => {
-  try {
-    await data.initializeState();
-    const { role, status, count } = req.body;
-    const entry = addStaffEntry({ hospitalId: req.auth.id, role, status, count });
-    res.status(201).json(entry);
-  } catch (error) {
-    res.status(500).json({ error: 'Unable to update staff' });
+    res.status(400).json({ error: error.message || 'Unable to create listing' });
   }
 });
 
@@ -173,6 +162,12 @@ router.post('/:hospitalId/approve', authMiddleware, requireAdmin, async (req, re
 
     if (!hospital) {
       return res.status(404).json({ error: 'Hospital not found' });
+    }
+    if (hospital.role !== 'Hospital') {
+      return res.status(400).json({ error: 'Only hospital registrations can be approved here' });
+    }
+    if (hospital.accountStatus !== 'Pending') {
+      return res.status(409).json({ error: 'Hospital registration has already been reviewed' });
     }
 
     hospital.accountStatus = 'Active';

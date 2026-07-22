@@ -119,10 +119,10 @@ function AccessAccountPanel({ currentHospital, loginForm, setLoginForm, handleRe
           </div>
         ) : null}
 
-        {isReviewer ? (
+        {currentHospital ? (
           <form className="form-grid profile-card" onSubmit={submitOwnPassword}>
             <div className="profile-info">
-              <h3>Change your password</h3>
+              <h3>Change account password</h3>
               <p className="subhead">Confirm your current password before choosing a new one.</p>
             </div>
             <div className="field">

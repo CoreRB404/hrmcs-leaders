@@ -1,8 +1,8 @@
 const express = require('express');
 const data = require('../data');
-const { createResourceRequest, respondToRequest, reviewRequestClinicalStage, approveRequest, prioritizeRequests } = require('../utils/hospitalService');
+const { createResourceRequest, respondToRequest, reviewRequestClinicalStage, approveRequest, reviewAdminRequest, prioritizeRequests } = require('../utils/hospitalService');
 const { recommendHospitals } = require('../utils/recommendation');
-const { authMiddleware, requireAdmin, requireRole, denyAdmin } = require('../utils/auth');
+const { authMiddleware, requireAdmin, requireRole } = require('../utils/auth');
 
 const router = express.Router();
 
@@ -38,14 +38,12 @@ router.get('/', authMiddleware, async (req, res) => {
 });
 
 // POST /api/requests
-router.post('/', authMiddleware, denyAdmin, async (req, res) => {
+router.post('/', authMiddleware, requireRole('Hospital'), async (req, res) => {
   try {
     await data.initializeState();
-    const { requesterHospitalId, providerHospitalId, resourceType, resourceName, quantity, urgency } = req.body;
-    console.log('[POST /api/requests] body:', JSON.stringify(req.body));
-    console.log('[POST /api/requests] parsed:', { requesterHospitalId, providerHospitalId, resourceName, quantity, type: typeof quantity });
+    const requesterHospitalId = req.auth.id;
+    const { providerHospitalId, resourceName, quantity, urgency } = req.body;
     if (!requesterHospitalId || !providerHospitalId || !resourceName || !quantity || quantity <= 0) {
-      console.log('[POST /api/requests] VALIDATION FAILED:', { requesterHospitalId: !!requesterHospitalId, providerHospitalId: !!providerHospitalId, resourceName: !!resourceName, quantity, quantityCheck: !quantity || quantity <= 0 });
       return res.status(400).json({ error: 'Request creation requires requester, provider, resource name, and positive quantity.' });
     }
     if (urgency && !VALID_URGENCIES.includes(urgency)) {
@@ -61,16 +59,16 @@ router.post('/', authMiddleware, denyAdmin, async (req, res) => {
       return res.status(400).json({ error: 'Provider hospital must be active to fulfill requests.' });
     }
 
-    const request = createResourceRequest(req.body);
+    const request = createResourceRequest({ ...req.body, requesterHospitalId });
     const suggestions = await recommendHospitals({ currentHospitalId: requesterHospitalId, resourceName, quantity, urgency: urgency || 'Low' });
     res.json({ request, suggestions });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(400).json({ error: error.message });
   }
 });
 
 // POST /api/requests/:id/respond
-router.post('/:id/respond', authMiddleware, denyAdmin, async (req, res) => {
+router.post('/:id/respond', authMiddleware, requireRole('Hospital'), async (req, res) => {
   try {
     await data.initializeState();
     const { response, notes } = req.body;
@@ -136,11 +134,28 @@ router.post('/:id/approve', authMiddleware, requireAdmin, async (req, res) => {
   }
 });
 
-// POST /api/requests/transfer
-router.post('/transfer', authMiddleware, denyAdmin, async (req, res) => {
+// POST /api/requests/:id/admin-review
+router.post('/:id/admin-review', authMiddleware, requireAdmin, async (req, res) => {
   try {
     await data.initializeState();
-    const { requesterHospitalId, providerHospitalId, resourceName, quantity, urgency } = req.body;
+    const request = reviewAdminRequest({
+      requestId: req.params.id,
+      approverHospitalId: req.auth.id,
+      decision: req.body.decision,
+      notes: req.body.notes,
+    });
+    res.json({ request });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+// POST /api/requests/transfer
+router.post('/transfer', authMiddleware, requireRole('Hospital'), async (req, res) => {
+  try {
+    await data.initializeState();
+    const requesterHospitalId = req.auth.id;
+    const { providerHospitalId, resourceName, quantity, urgency } = req.body;
     if (!requesterHospitalId || !providerHospitalId || !resourceName || !quantity || quantity <= 0) {
       return res.status(400).json({ error: 'Please select a provider, add a resource name, and enter a positive quantity.' });
     }
@@ -157,7 +172,7 @@ router.post('/transfer', authMiddleware, denyAdmin, async (req, res) => {
       return res.status(400).json({ error: 'Provider now must be active to receive transfer requests.' });
     }
 
-    const request = createResourceRequest(req.body);
+    const request = createResourceRequest({ ...req.body, requesterHospitalId });
     res.status(201).json(request);
   } catch (error) {
     res.status(400).json({ error: error.message });

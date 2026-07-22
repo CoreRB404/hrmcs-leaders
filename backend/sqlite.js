@@ -102,17 +102,7 @@ async function initializeDb() {
         quantity INTEGER NOT NULL,
         availableForBorrow INTEGER NOT NULL,
         availableForOrder INTEGER NOT NULL,
-        createdAt TEXT NOT NULL
-      )
-    `);
-
-    await runAsync(db, `
-      CREATE TABLE IF NOT EXISTS staff (
-        id TEXT PRIMARY KEY,
-        hospitalId TEXT NOT NULL,
-        role TEXT NOT NULL,
-        status TEXT NOT NULL,
-        count INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'Active',
         createdAt TEXT NOT NULL
       )
     `);
@@ -171,13 +161,40 @@ async function initializeDb() {
       }
     }
 
+    const inventoryTableInfo = await allAsync(db, "PRAGMA table_info(inventory)");
+    const inventoryColumns = new Set(inventoryTableInfo.map((column) => column.name));
+    for (const [columnName, columnType] of [
+      ['publishedQuantity', 'INTEGER'], ['availableQuantity', 'INTEGER'],
+      ['lentQuantity', 'INTEGER DEFAULT 0'], ['status', "TEXT DEFAULT 'Active'"],
+    ]) {
+      if (!inventoryColumns.has(columnName)) {
+        try {
+          await runAsync(db, `ALTER TABLE inventory ADD COLUMN ${columnName} ${columnType}`);
+        } catch (error) {
+          if (!String(error.message).includes('duplicate column name')) throw error;
+        }
+      }
+    }
+    await runAsync(db, "UPDATE inventory SET publishedQuantity = COALESCE(publishedQuantity, quantity), availableQuantity = COALESCE(availableQuantity, quantity), lentQuantity = COALESCE(lentQuantity, 0), status = COALESCE(status, 'Active')");
+
+    // The product is supply-only. Remove legacy patient-support records and
+    // the retired staffing table during migration.
+    await runAsync(db, "DELETE FROM requests WHERE type = 'PatientSupport'");
+    await runAsync(db, 'DROP TABLE IF EXISTS staff');
+
     await runAsync(db, `
       CREATE TABLE IF NOT EXISTS notifications (
         id TEXT PRIMARY KEY,
         message TEXT NOT NULL,
-        severity TEXT NOT NULL
+        severity TEXT NOT NULL,
+        timestamp TEXT
       )
     `);
+    const notificationTableInfo = await allAsync(db, "PRAGMA table_info(notifications)");
+    const notificationColumns = new Set(notificationTableInfo.map((column) => column.name));
+    for (const [columnName, columnType] of [['timestamp', 'TEXT']]) {
+      if (!notificationColumns.has(columnName)) await runAsync(db, `ALTER TABLE notifications ADD COLUMN ${columnName} ${columnType}`);
+    }
 
     await runAsync(db, `
       CREATE TABLE IF NOT EXISTS hospital_distances (
@@ -191,13 +208,9 @@ async function initializeDb() {
     const defaultDistances = [
       ['hospital-admin', 'hospital-demo', 3], ['hospital-admin', 'hospital-central', 4],
       ['hospital-admin', 'hospital-riverside', 6], ['hospital-admin', 'hospital-westbridge', 8],
-      ['hospital-admin', 'hospital-eastbay', 5], ['hospital-central', 'hospital-demo', 5],
-      ['hospital-demo', 'hospital-riverside', 4], ['hospital-demo', 'hospital-westbridge', 7],
-      ['hospital-demo', 'hospital-eastbay', 6], ['hospital-central', 'hospital-riverside', 7],
-      ['hospital-central', 'hospital-westbridge', 5], ['hospital-central', 'hospital-eastbay', 3],
-      ['hospital-riverside', 'hospital-westbridge', 4], ['hospital-eastbay', 'hospital-riverside', 8],
-      ['hospital-eastbay', 'hospital-westbridge', 6],
+      ['hospital-admin', 'hospital-eastbay', 5],
     ];
+    await runAsync(db, "DELETE FROM hospital_distances WHERE fromHospitalId <> 'hospital-admin' AND toHospitalId <> 'hospital-admin'");
     for (const [fromHospitalId, toHospitalId, distance] of defaultDistances) {
       await runAsync(db, `INSERT OR IGNORE INTO hospital_distances (fromHospitalId, toHospitalId, distance) VALUES (?, ?, ?)`, [fromHospitalId, toHospitalId, distance]);
     }
@@ -407,17 +420,6 @@ function seedDefaultUsers({ force = false } = {}) {
         ['inventory-8', 'hospital-eastbay', 'Supply', 'Defibrillators', 4, 1, 0, '2026-07-09T00:00:00.000Z'],
       ];
 
-      const staffEntries = [
-        ['staff-1', 'hospital-demo', 'Nurse', 'Available', 6, '2026-07-09T00:00:00.000Z'],
-        ['staff-2', 'hospital-demo', 'Respiratory Therapist', 'Available', 3, '2026-07-09T00:00:00.000Z'],
-        ['staff-3', 'hospital-central', 'Surgeon', 'Available', 4, '2026-07-09T00:00:00.000Z'],
-        ['staff-4', 'hospital-central', 'Nurse', 'Available', 10, '2026-07-09T00:00:00.000Z'],
-        ['staff-5', 'hospital-riverside', 'Technician', 'Deployable', 5, '2026-07-09T00:00:00.000Z'],
-        ['staff-6', 'hospital-riverside', 'Nurse', 'Available', 7, '2026-07-09T00:00:00.000Z'],
-        ['staff-7', 'hospital-eastbay', 'Nurse', 'Available', 8, '2026-07-09T00:00:00.000Z'],
-        ['staff-8', 'hospital-eastbay', 'Pharmacist', 'Available', 3, '2026-07-09T00:00:00.000Z'],
-      ];
-
       // Seed requests now use the proper runtime schema with requesterHospitalId/providerHospitalId
       const timestamp = '2026-07-09T00:00:00.000Z';
       const requests = [
@@ -548,7 +550,6 @@ function seedDefaultUsers({ force = false } = {}) {
       // A forced reset (or first run) starts from the known demo dataset.
       await runAsync(db, 'DELETE FROM hospitals');
       await runAsync(db, 'DELETE FROM inventory');
-      await runAsync(db, 'DELETE FROM staff');
       await runAsync(db, 'DELETE FROM requests');
       await runAsync(db, 'DELETE FROM notifications');
       await runAsync(db, 'DELETE FROM hospital_distances');
@@ -571,14 +572,6 @@ function seedDefaultUsers({ force = false } = {}) {
         await runAsync(db, `
           INSERT OR REPLACE INTO inventory (id, hospitalId, resourceType, resourceName, quantity, availableForBorrow, availableForOrder, createdAt)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `, row);
-      }
-
-      // Insert staff
-      for (const row of staffEntries) {
-        await runAsync(db, `
-          INSERT OR REPLACE INTO staff (id, hospitalId, role, status, count, createdAt)
-          VALUES (?, ?, ?, ?, ?, ?)
         `, row);
       }
 
@@ -605,12 +598,7 @@ function seedDefaultUsers({ force = false } = {}) {
       const defaultDistances = [
         ['hospital-admin', 'hospital-demo', 3], ['hospital-admin', 'hospital-central', 4],
         ['hospital-admin', 'hospital-riverside', 6], ['hospital-admin', 'hospital-westbridge', 8],
-        ['hospital-admin', 'hospital-eastbay', 5], ['hospital-central', 'hospital-demo', 5],
-        ['hospital-demo', 'hospital-riverside', 4], ['hospital-demo', 'hospital-westbridge', 7],
-        ['hospital-demo', 'hospital-eastbay', 6], ['hospital-central', 'hospital-riverside', 7],
-        ['hospital-central', 'hospital-westbridge', 5], ['hospital-central', 'hospital-eastbay', 3],
-        ['hospital-riverside', 'hospital-westbridge', 4], ['hospital-eastbay', 'hospital-riverside', 8],
-        ['hospital-eastbay', 'hospital-westbridge', 6],
+        ['hospital-admin', 'hospital-eastbay', 5],
       ];
       for (const row of defaultDistances) {
         await runAsync(db, `INSERT OR REPLACE INTO hospital_distances (fromHospitalId, toHospitalId, distance) VALUES (?, ?, ?)`, row);
@@ -655,37 +643,14 @@ function getInventory() {
         resourceType,
         resourceName,
         quantity,
-        quantity AS publishedQuantity,
-        quantity AS availableQuantity,
+        COALESCE(publishedQuantity, quantity) AS publishedQuantity,
+        COALESCE(availableQuantity, quantity) AS availableQuantity,
+        COALESCE(lentQuantity, 0) AS lentQuantity,
         availableForBorrow,
         availableForOrder,
+        COALESCE(status, 'Active') AS status,
         createdAt
       FROM inventory
-      ORDER BY createdAt
-    `, (err, rows) => {
-      db.close();
-      if (err) reject(err); else resolve(rows);
-    });
-  });
-}
-
-function getStaff() {
-  return new Promise((resolve, reject) => {
-    const db = openDb();
-    db.all(`
-      SELECT
-        id,
-        hospitalId,
-        role,
-        status,
-        count,
-        count AS publishedCount,
-        CASE
-          WHEN status = 'Available' OR status = 'Deployable' THEN count
-          ELSE 0
-        END AS availableCount,
-        createdAt
-      FROM staff
       ORDER BY createdAt
     `, (err, rows) => {
       db.close();
@@ -800,16 +765,20 @@ async function upsertInventoryItem(item) {
   const db = openDb();
   try {
     await runAsync(db, `
-      INSERT OR REPLACE INTO inventory (id, hospitalId, resourceType, resourceName, quantity, availableForBorrow, availableForOrder, createdAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT OR REPLACE INTO inventory (id, hospitalId, resourceType, resourceName, quantity, publishedQuantity, availableQuantity, lentQuantity, availableForBorrow, availableForOrder, status, createdAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       item.id,
       item.hospitalId,
       item.resourceType,
       item.resourceName,
       item.quantity,
+      item.publishedQuantity ?? item.quantity,
+      item.availableQuantity ?? item.quantity,
+      item.lentQuantity || 0,
       item.availableForBorrow ? 1 : 0,
       item.availableForOrder ? 1 : 0,
+      item.status === 'Inactive' ? 'Inactive' : 'Active',
       item.createdAt || new Date().toISOString(),
     ]);
     await closeAsync(db);
@@ -819,13 +788,10 @@ async function upsertInventoryItem(item) {
   }
 }
 
-async function insertStaffEntry(entry) {
+async function deleteInventoryItem(itemId) {
   const db = openDb();
   try {
-    await runAsync(db, `
-      INSERT OR REPLACE INTO staff (id, hospitalId, role, status, count, createdAt)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `, [entry.id, entry.hospitalId, entry.role, entry.status, entry.count, entry.createdAt]);
+    await runAsync(db, 'DELETE FROM inventory WHERE id = ?', [itemId]);
     await closeAsync(db);
   } catch (err) {
     try { await closeAsync(db); } catch (e) { /* ignore */ }
@@ -875,7 +841,6 @@ async function deleteHospitalById(hospitalId) {
   try {
     await runAsync(db, 'DELETE FROM hospitals WHERE id = ? OR hospitalId = ?', [hospitalId, hospitalId]);
     await runAsync(db, 'DELETE FROM inventory WHERE hospitalId = ?', [hospitalId]);
-    await runAsync(db, 'DELETE FROM staff WHERE hospitalId = ?', [hospitalId]);
     await runAsync(db, 'DELETE FROM requests WHERE requesterHospitalId = ? OR providerHospitalId = ?', [hospitalId, hospitalId]);
     await runAsync(db, 'DELETE FROM hospital_distances WHERE fromHospitalId = ? OR toHospitalId = ?', [hospitalId, hospitalId]);
     for (const [email, hospital] of hospitalEmailCache.entries()) {
@@ -969,7 +934,6 @@ module.exports = {
   resetSeedState,
   getHospitals,
   getInventory,
-  getStaff,
   getRequests,
   getNotifications,
   getHospitalDistances,
@@ -978,7 +942,7 @@ module.exports = {
   insertHospital,
   upsertHospitalDistance,
   upsertInventoryItem,
-  insertStaffEntry,
+  deleteInventoryItem,
   updateHospitalStatus,
   updateHospitalAccount,
   deleteHospitalById,

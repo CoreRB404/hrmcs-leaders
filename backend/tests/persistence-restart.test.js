@@ -48,25 +48,15 @@ async function child(phase) {
       availableForOrder: false,
       createdAt: new Date().toISOString(),
     });
-    await sqlite.insertStaffEntry({
-      id: 'staff-persistence-test',
-      hospitalId: 'hospital-persistence-test',
-      role: 'Nurse',
-      status: 'Available',
-      count: 3,
-      createdAt: new Date().toISOString(),
-    });
     return;
   }
 
-  const [hospitals, inventory, staff] = await Promise.all([
+  const [hospitals, inventory] = await Promise.all([
     sqlite.getHospitals(),
     sqlite.getInventory(),
-    sqlite.getStaff(),
   ]);
   assert(hospitals.some((item) => item.id === 'hospital-persistence-test'));
   assert(inventory.some((item) => item.id === 'inventory-persistence-test'));
-  assert(staff.some((item) => item.id === 'staff-persistence-test'));
 }
 
 if (process.argv[2]) {

@@ -11,8 +11,14 @@ function AdminOversightPanel({
   approveHospital,
   deleteHospital,
   approve,
+  reviewAdminRequest,
   getHospitalName,
 }) {
+  const isReadyForAdmin = (request) => request.status === 'Pending'
+    && request.pharmacistApproval === 'Approved'
+    && request.doctorApproval === 'Approved'
+    && request.providerApproval === 'Approved';
+  const pendingRequests = requests.filter((request) => request.status === 'Pending');
   const statCards = [
     { icon: '🏥', label: 'Hospitals', value: adminSummaryResolved.totalHospitals },
     { icon: '📋', label: 'Pending requests', value: adminSummaryResolved.pendingRequests },
@@ -116,10 +122,10 @@ function AdminOversightPanel({
 
       <section className="admin-subsection" style={{ marginTop: 16 }}>
         <div className="section-header">
-          <h3>Pending resource transfers <span className="result-count">{requests.filter((r) => r.status === 'Pending').length}</span></h3>
+          <h3>Pending resource transfers <span className="result-count">{pendingRequests.length}</span></h3>
         </div>
         <div className="stack">
-          {requests.filter((request) => request.status === 'Pending').length ? requests.filter((request) => request.status === 'Pending').map((request) => (
+          {pendingRequests.length ? pendingRequests.map((request) => (
             <div key={request.id} className="list-item request-item status-pending">
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -136,7 +142,12 @@ function AdminOversightPanel({
                   <div style={{ marginTop: 6, fontSize: '0.82rem', color: '#475569' }}>{request.history[request.history.length - 1].note}</div>
                 ) : null}
               </div>
-              <button className="approve-button" onClick={() => approve(request.id)}>Approve</button>
+              {isReadyForAdmin(request) ? (
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button className="approve-button" onClick={() => approve(request.id)}>Approve</button>
+                  <button className="action-reject" onClick={() => reviewAdminRequest(request.id, 'reject')}>Reject</button>
+                </div>
+              ) : <span className="badge pending">Not at admin stage</span>}
             </div>
           )) : (
             <div className="empty-state">

@@ -35,11 +35,7 @@ function ResourceRequestList({ currentHospital, filteredRequests, timelineOpenId
               </div>
               {request.reason ? <div style={{ marginTop: 5, fontSize: '0.76rem', color: 'var(--text-secondary)' }}>{request.reason}</div> : null}
               <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: 4 }}>
-                {request.type === 'PatientSupport' ? (
-                  <>{getHospitalName(request.hospitalId)} · Patient Support ({request.patientType}) · Priority: {request.priority}</>
-                ) : (
-                  <>{getHospitalName(request.requesterHospitalId)} → {getHospitalName(request.providerHospitalId)} · {request.quantity} units · {request.requestType || request.type} · Provider: {request.providerApproval || 'N/A'}</>
-                )}
+                {getHospitalName(request.requesterHospitalId)} → {getHospitalName(request.providerHospitalId)} · {request.quantity} units · {request.requestType || request.type} · Provider: {request.providerApproval || 'N/A'}
               </div>
               {request.history?.length ? (
                 <div style={{ marginTop: 8, fontSize: '0.82rem', color: '#475569' }}>

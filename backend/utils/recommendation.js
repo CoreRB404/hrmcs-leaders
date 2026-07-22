@@ -77,15 +77,29 @@ function getReliabilityMetrics(hospitalId, requests) {
 
 function getPairDistance(fromHospitalId, toHospitalId, distances, hospitals) {
   if (!fromHospitalId || !toHospitalId) return { distance: null, estimated: true };
-  if (fromHospitalId === toHospitalId) return { distance: 0, estimated: false };
-  const [fromId, toId] = [fromHospitalId, toHospitalId].sort();
-  const saved = distances.find((entry) => entry.fromHospitalId === fromId && entry.toHospitalId === toId);
-  if (saved) return { distance: Number(saved.distance), estimated: false };
+  if (fromHospitalId === toHospitalId) return { distance: 0, estimated: false, calculated: true };
 
-  const from = hospitals.find((hospital) => hospital.id === fromHospitalId);
-  const to = hospitals.find((hospital) => hospital.id === toHospitalId);
-  const fallback = Number(from?.distance || 0) + Number(to?.distance || 0);
-  return { distance: fallback, estimated: true };
+  const getAdminRelativeDistance = (hospitalId) => {
+    if (hospitalId === 'hospital-admin') return 0;
+    const hospital = hospitals.find((entry) => entry.id === hospitalId);
+    const directValue = Number(hospital?.distance);
+    if (Number.isFinite(directValue)) return directValue;
+    const [fromId, toId] = ['hospital-admin', hospitalId].sort();
+    const saved = distances.find((entry) => entry.fromHospitalId === fromId && entry.toHospitalId === toId);
+    return saved ? Number(saved.distance) : null;
+  };
+
+  const fromDistance = getAdminRelativeDistance(fromHospitalId);
+  const toDistance = getAdminRelativeDistance(toHospitalId);
+  if (!Number.isFinite(fromDistance) || !Number.isFinite(toDistance)) {
+    return { distance: null, estimated: true, calculated: false };
+  }
+
+  return {
+    distance: Math.abs(fromDistance - toDistance),
+    estimated: false,
+    calculated: true,
+  };
 }
 
 async function scoreHospital(hospital, resourceName, quantity, urgency = 'Low', requesterDistance = null) {
@@ -94,7 +108,7 @@ async function scoreHospital(hospital, resourceName, quantity, urgency = 'Low', 
   const activeHospitalIds = hospitals.filter((entry) => entry.accountStatus === 'Active').map((entry) => entry.id);
   const hospitalInventoryItems = inventory.filter((item) => {
     const itemHospitalId = item.hospitalId || item.hospital_id;
-    return activeHospitalIds.includes(itemHospitalId) && itemHospitalId === hospital.id;
+    return activeHospitalIds.includes(itemHospitalId) && itemHospitalId === hospital.id && item.status !== 'Inactive';
   });
   const matchingInventoryItems = hospitalInventoryItems.filter((item) => {
     const itemName = item.resourceName || item.item || item.name || '';
@@ -102,10 +116,10 @@ async function scoreHospital(hospital, resourceName, quantity, urgency = 'Low', 
     return itemName.toLowerCase() === resourceName.toLowerCase();
   });
   const inventoryCount = matchingInventoryItems.reduce((sum, item) => {
-    return sum + (item.publishedQuantity ?? item.availableQuantity ?? item.quantity ?? item.available ?? item.stock ?? 0);
+    return sum + (item.availableQuantity ?? item.quantity ?? item.publishedQuantity ?? item.available ?? item.stock ?? 0);
   }, 0);
   const fallbackInventoryCount = hospitalInventoryItems.length
-    ? (hospitalInventoryItems[0].publishedQuantity ?? hospitalInventoryItems[0].availableQuantity ?? hospitalInventoryItems[0].quantity ?? hospitalInventoryItems[0].available ?? hospitalInventoryItems[0].stock ?? 0)
+    ? (hospitalInventoryItems[0].availableQuantity ?? hospitalInventoryItems[0].quantity ?? hospitalInventoryItems[0].publishedQuantity ?? hospitalInventoryItems[0].available ?? hospitalInventoryItems[0].stock ?? 0)
     : 0;
   const stockQuantity = inventoryCount > 0 ? inventoryCount : fallbackInventoryCount;
 

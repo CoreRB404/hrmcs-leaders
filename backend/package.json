@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node tests/hospital-flow.test.js && node tests/recommendation.test.js && node tests/persistence-restart.test.js && node tests/emergency-readiness-access.test.js"
+    "test": "node tests/hospital-flow.test.js && node tests/recommendation.test.js && node tests/persistence-restart.test.js && node tests/emergency-readiness-access.test.js && node tests/authorization-boundaries.test.js"
   },
   "dependencies": {
     "cors": "^2.8.0",

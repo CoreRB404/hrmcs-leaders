@@ -1,5 +1,5 @@
 module.exports = {
-  readDb: () => ({ hospitals: [], inventory: [], staff: [], requests: [], notifications: [] }),
+  readDb: () => ({ hospitals: [], inventory: [], requests: [], notifications: [] }),
   writeDb: () => undefined,
   resetDb: () => undefined,
 };

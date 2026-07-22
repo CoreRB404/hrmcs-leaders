@@ -10,16 +10,13 @@ async function getDashboard(req, res) {
     await data.initializeState();
     const hospitals = data.getHospitals().filter((hospital) => hospital.role === 'Hospital');
     const inventory = data.getInventory();
-    const staff = data.getStaff();
     const requests = data.getRequests();
     const criticalShortages = inventory.filter((item) => item.quantity <= item.minimumThreshold);
-    const availableStaff = staff.filter((member) => member.status === 'Available' || member.status === 'Deployable');
 
     res.json({
       totalHospitals: hospitals.length,
       totalInventoryItems: inventory.length,
       criticalShortages,
-      availableStaffCount: availableStaff.length,
       pendingRequests: requests.filter((request) => request.status === 'Pending').length,
       approvedRequests: requests.filter((request) => request.status === 'Approved').length,
       emergencyAlerts: hospitals.filter((hospital) => hospital.emergencyStatus === 'High').length,
@@ -45,9 +42,8 @@ async function getHospitalDashboard(req, res) {
 
     const hospitalInventory = data.getInventory().filter((item) => item.hospitalId === hospital.id);
     const hospitalRequests = prioritizeRequests(data.getRequests()).filter((request) => request.requesterHospitalId === hospital.id || request.providerHospitalId === hospital.id || request.hospitalId === hospital.id);
-    const hospitalStaff = data.getStaff().filter((staff) => staff.hospitalId === hospital.id);
     const { password, ...publicHospital } = hospital;
-    res.json({ hospital: publicHospital, hospitalInventory, hospitalRequests, hospitalStaff });
+    res.json({ hospital: publicHospital, hospitalInventory, hospitalRequests });
   } catch (error) {
     console.error('Hospital dashboard error', error);
     res.status(500).json({ error: 'Unable to load hospital dashboard' });

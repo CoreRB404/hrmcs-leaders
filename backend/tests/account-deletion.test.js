@@ -22,7 +22,6 @@ test('admin can delete a hospital account and remove linked data', () => {
 
   const inventoryEntry = { id: 'listing-1', hospitalId: hospital.id, resourceType: 'Supply', resourceName: 'IV Fluids', quantity: 10, publishedQuantity: 10, availableQuantity: 10, lentQuantity: 0, reserved: 0, availableForBorrow: true, availableForOrder: true, status: 'Listed', minimumThreshold: 5 };
   state.inventory = [inventoryEntry];
-  state.staff = [{ id: 'staff-1', hospitalId: hospital.id, role: 'Nurse', status: 'Available', count: 3, publishedCount: 3, deployedCount: 0, availableCount: 3, createdAt: '2026-07-04T00:00:00.000Z' }];
   state.requests = [{ id: 'req-1', requesterHospitalId: hospital.id, providerHospitalId: 'hospital-b', resourceName: 'Masks', quantity: 2, requestType: 'Borrow', notes: '', status: 'Pending', providerApproval: 'Pending', providerResponseNotes: '', history: [], createdAt: '2026-07-04T00:00:00.000Z' }];
   data.setState(state);
 
@@ -31,6 +30,5 @@ test('admin can delete a hospital account and remove linked data', () => {
   assert.equal(result.deletedHospital.id, hospital.id);
   assert.equal(data.getHospitals().some((entry) => entry.id === hospital.id), false);
   assert.equal(data.getInventory().some((entry) => entry.hospitalId === hospital.id), false);
-  assert.equal(data.getStaff().some((entry) => entry.hospitalId === hospital.id), false);
   assert.equal(data.getRequests().some((entry) => entry.requesterHospitalId === hospital.id), false);
 });

@@ -29,7 +29,7 @@ function getRequestPriority(request, now = Date.now()) {
 }
 
 function prioritizeRequests(requests, now = Date.now()) {
-  const pending = requests.filter((request) => request.status === 'Pending' && request.type !== 'PatientSupport');
+  const pending = requests.filter((request) => request.status === 'Pending');
   const queues = new Map();
   for (const request of pending) {
     const queue = queues.get(request.providerHospitalId) || [];
@@ -53,57 +53,120 @@ function prioritizeRequests(requests, now = Date.now()) {
   return requests
     .map((request) => ({ ...request, ...(priorityById.get(request.id) || {}) }))
     .sort((first, second) => {
-      const firstPending = first.status === 'Pending' && first.type !== 'PatientSupport';
-      const secondPending = second.status === 'Pending' && second.type !== 'PatientSupport';
+      const firstPending = first.status === 'Pending';
+      const secondPending = second.status === 'Pending';
       if (firstPending !== secondPending) return firstPending ? -1 : 1;
       if (firstPending && first.effectiveRank !== second.effectiveRank) return second.effectiveRank - first.effectiveRank;
       return new Date(first.createdAt).getTime() - new Date(second.createdAt).getTime();
     });
 }
 
-function commitInventoryItem(hospitalId, resourceName, quantity) {
+function getMatchingPublishedSupplies(hospitalId, resourceName, requestType = 'Borrow') {
+  const normalizedName = String(resourceName || '').trim().toLowerCase();
+  const normalizedType = requestType === 'Order' ? 'Order' : 'Borrow';
+
+  return data.getInventory().filter((item) => {
+    if (item.status === 'Inactive') return false;
+    if (item.hospitalId !== hospitalId || String(item.resourceName || '').trim().toLowerCase() !== normalizedName) {
+      return false;
+    }
+    return normalizedType === 'Order' ? item.availableForOrder : item.availableForBorrow;
+  });
+}
+
+function validatePublishedSupply(hospitalId, resourceName, quantity, requestType = 'Borrow') {
+  const numericQuantity = Number(quantity);
+  if (!Number.isFinite(numericQuantity) || numericQuantity <= 0) {
+    throw new Error('Request quantity must be a positive number');
+  }
+
+  const normalizedName = String(resourceName || '').trim().toLowerCase();
+  const allNameMatches = data.getInventory().filter((item) => (
+    item.hospitalId === hospitalId
+    && String(item.resourceName || '').trim().toLowerCase() === normalizedName
+  ));
+  if (!allNameMatches.length) {
+    throw new Error('The selected provider has not published this supply');
+  }
+
+  const matchingSupplies = getMatchingPublishedSupplies(hospitalId, resourceName, requestType);
+  if (!matchingSupplies.length) {
+    throw new Error(`This supply is not published for ${requestType === 'Order' ? 'ordering' : 'borrowing'} by the selected provider`);
+  }
+
+  const availableQuantity = matchingSupplies.reduce(
+    (total, item) => total + Number(item.availableQuantity ?? item.quantity ?? 0),
+    0
+  );
+  if (numericQuantity > availableQuantity) {
+    throw new Error(`Only ${availableQuantity} units are currently available from the selected provider`);
+  }
+
+  return { matchingSupplies, availableQuantity, numericQuantity };
+}
+
+function commitInventoryItem(hospitalId, resourceName, quantity, requestType = 'Borrow') {
   const inventory = data.getInventory();
-  const item = inventory.find((it) => it.hospitalId === hospitalId && it.resourceName.toLowerCase() === resourceName.toLowerCase());
-  if (!item) {
-    throw new Error('Resource not found at the selected provider');
+  const { matchingSupplies, numericQuantity } = validatePublishedSupply(hospitalId, resourceName, quantity, requestType);
+  let remaining = numericQuantity;
+
+  for (const item of matchingSupplies) {
+    if (remaining <= 0) break;
+    const available = Number(item.availableQuantity ?? item.quantity ?? 0);
+    const committed = Math.min(available, remaining);
+    item.quantity = Math.max(0, Number(item.quantity ?? available) - committed);
+    item.availableQuantity = Math.max(0, available - committed);
+    item.lentQuantity = Number(item.lentQuantity || 0) + committed;
+    remaining -= committed;
+    data.persistInventoryItem(item);
   }
 
-  const available = item.availableQuantity ?? item.quantity;
-  if (quantity > available) {
-    throw new Error('Not enough inventory available to reserve');
-  }
-
-  item.quantity = Math.max(0, (item.quantity ?? available) - quantity);
-  item.availableQuantity = item.quantity;
-  item.lentQuantity = (item.lentQuantity || 0) + quantity;
   const state = data.getState();
   state.inventory = inventory;
   data.setState(state);
-  data.persistInventoryItem(item);
-  return item;
+  return matchingSupplies[0];
 }
 
-function registerHospital({ name, location, email, password, visibility, type, role = 'Hospital', emergencyStatus }) {
+function registerHospital({ name, location, email, password, visibility, type, emergencyStatus }) {
   const hospitals = data.getHospitals();
   const notifications = data.getNotifications();
 
-  // Check for duplicate email
-  if (data.emailExistsInMemory(email)) {
-    throw new Error('A hospital with this email already exists');
+  const normalizedName = String(name || '').trim();
+  const normalizedLocation = String(location || '').trim();
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  const normalizedPassword = String(password || '');
+  const normalizedVisibility = ['Public', 'Private'].includes(visibility) ? visibility : 'Public';
+  const normalizedType = ['General', 'Specialist', 'Emergency'].includes(type) ? type : 'General';
+  const normalizedEmergencyStatus = emergencyStatus == null ? 'Medium' : emergencyStatus;
+
+  if (normalizedName.length < 2 || normalizedLocation.length < 2) {
+    throw new Error('Hospital name and location are required');
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+    throw new Error('A valid hospital email is required');
+  }
+  if (normalizedPassword.length < 8) {
+    throw new Error('Password must be at least 8 characters');
+  }
+  if (!['Low', 'Medium', 'High'].includes(normalizedEmergencyStatus)) {
+    throw new Error('Invalid emergency status');
   }
 
-  const normalizedEmergencyStatus = emergencyStatus == null ? 'Medium' : emergencyStatus;
+  // Check for duplicate email
+  if (data.emailExistsInMemory(normalizedEmail)) {
+    throw new Error('A hospital with this email already exists');
+  }
 
   const hospitalId = `hospital-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const hospital = {
     id: hospitalId,
-    name,
-    location,
-    email,
-    password: hashPassword(password),
-    visibility,
-    type,
-    role,
+    name: normalizedName,
+    location: normalizedLocation,
+    email: normalizedEmail,
+    password: hashPassword(normalizedPassword),
+    visibility: normalizedVisibility,
+    type: normalizedType,
+    role: 'Hospital',
     accountStatus: 'Pending',
     createdAt: new Date().toISOString(),
     emergencyStatus: normalizedEmergencyStatus,
@@ -114,8 +177,8 @@ function registerHospital({ name, location, email, password, visibility, type, r
     distance: 0,
   };
 
-  const reviewerCredentials = role === 'Hospital' ? (() => {
-    const [rawLocalPart, rawDomain = 'hrmcs.local'] = String(email).toLowerCase().split('@');
+  const reviewerCredentials = (() => {
+    const [rawLocalPart, rawDomain = 'hrmcs.local'] = normalizedEmail.split('@');
     const localPart = rawLocalPart.replace(/[^a-z0-9._-]/g, '') || 'hospital';
     const domain = rawDomain.replace(/[^a-z0-9.-]/g, '') || 'hrmcs.local';
     const uniqueKey = hospitalId.split('-').pop();
@@ -129,14 +192,14 @@ function registerHospital({ name, location, email, password, visibility, type, r
         password: 'Pharmacist@1234',
       },
     };
-  })() : null;
+  })();
 
   const reviewerAccounts = reviewerCredentials ? [
     {
       id: `reviewer-${hospitalId}-doctor`,
       hospitalId,
-      name: `${name} Doctor`,
-      location,
+      name: `${normalizedName} Doctor`,
+      location: normalizedLocation,
       email: reviewerCredentials.doctor.email,
       password: hashPassword(reviewerCredentials.doctor.password),
       visibility: 'Private',
@@ -154,8 +217,8 @@ function registerHospital({ name, location, email, password, visibility, type, r
     {
       id: `reviewer-${hospitalId}-pharmacist`,
       hospitalId,
-      name: `${name} Pharmacist`,
-      location,
+      name: `${normalizedName} Pharmacist`,
+      location: normalizedLocation,
       email: reviewerCredentials.pharmacist.email,
       password: hashPassword(reviewerCredentials.pharmacist.password),
       visibility: 'Private',
@@ -180,7 +243,7 @@ function registerHospital({ name, location, email, password, visibility, type, r
   state.notifications = notifications;
   notifications.unshift({
     id: `notif-${Date.now()}`,
-    message: `${name} registered to the shared hospital network`,
+    message: `${normalizedName} registered to the shared hospital network`,
     severity: 'High',
     timestamp: new Date().toISOString(),
   });
@@ -248,19 +311,32 @@ async function updateHospitalDistance(hospitalId, distance) {
 
 function addResourceListing({ hospitalId, resourceType, resourceName, quantity, availableForBorrow, availableForOrder }) {
   const inventory = data.getInventory();
+  const normalizedResourceName = String(resourceName || '').trim();
+  const numericQuantity = Number(quantity);
+  if (!normalizedResourceName || !Number.isInteger(numericQuantity) || numericQuantity <= 0) {
+    throw new Error('A resource name and positive whole-number quantity are required');
+  }
+  if (!availableForBorrow && !availableForOrder) {
+    throw new Error('A listing must be available for borrowing, ordering, or both');
+  }
+  const duplicate = inventory.some((item) => item.hospitalId === hospitalId
+    && String(item.resourceName || '').trim().toLowerCase() === normalizedResourceName.toLowerCase());
+  if (duplicate) {
+    throw new Error('This hospital already has a listing for this supply. Edit or reactivate the existing listing instead');
+  }
   const listing = {
     id: `listing-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     hospitalId,
-    resourceType,
-    resourceName,
-    quantity,
-    publishedQuantity: quantity,
-    availableQuantity: quantity,
+    resourceType: 'Supply',
+    resourceName: normalizedResourceName,
+    quantity: numericQuantity,
+    publishedQuantity: numericQuantity,
+    availableQuantity: numericQuantity,
     lentQuantity: 0,
     reserved: 0,
     availableForBorrow,
     availableForOrder,
-    status: 'Listed',
+    status: 'Active',
     minimumThreshold: 5,
     createdAt: new Date().toISOString(),
   };
@@ -273,11 +349,80 @@ function addResourceListing({ hospitalId, resourceType, resourceName, quantity, 
   return listing;
 }
 
+function updateResourceListing({ listingId, hospitalId, resourceName, quantity, availableForBorrow, availableForOrder }) {
+  const item = data.getInventory().find((entry) => entry.id === listingId);
+  if (!item) throw new Error('Supply listing not found');
+  if (item.hospitalId !== hospitalId) throw new Error('You cannot edit another hospital inventory');
+
+  const normalizedResourceName = String(resourceName || '').trim();
+  const numericQuantity = Number(quantity);
+  if (!normalizedResourceName || !Number.isInteger(numericQuantity) || numericQuantity < 0) {
+    throw new Error('A resource name and non-negative whole-number quantity are required');
+  }
+  if (!availableForBorrow && !availableForOrder) {
+    throw new Error('The supply must be available for borrowing, ordering, or both');
+  }
+  const duplicate = data.getInventory().some((entry) => entry.id !== listingId
+    && entry.hospitalId === hospitalId
+    && String(entry.resourceName || '').trim().toLowerCase() === normalizedResourceName.toLowerCase());
+  if (duplicate) throw new Error('This hospital already has another listing for this supply');
+
+  item.resourceName = normalizedResourceName;
+  item.quantity = numericQuantity;
+  item.availableQuantity = numericQuantity;
+  item.publishedQuantity = numericQuantity + Number(item.lentQuantity || 0);
+  item.availableForBorrow = Boolean(availableForBorrow);
+  item.availableForOrder = Boolean(availableForOrder);
+  data.persistInventoryItem(item);
+  return item;
+}
+
+function setResourceListingStatus({ listingId, hospitalId, status }) {
+  const item = data.getInventory().find((entry) => entry.id === listingId);
+  if (!item) throw new Error('Supply listing not found');
+  if (item.hospitalId !== hospitalId) throw new Error('You cannot manage another hospital inventory');
+  if (!['Active', 'Inactive'].includes(status)) throw new Error('Listing status must be Active or Inactive');
+  item.status = status;
+  data.persistInventoryItem(item);
+  return item;
+}
+
+function deleteResourceListing({ listingId, hospitalId }) {
+  const inventory = data.getInventory();
+  const item = inventory.find((entry) => entry.id === listingId);
+  if (!item) throw new Error('Supply listing not found');
+  if (item.hospitalId !== hospitalId) throw new Error('You cannot delete another hospital inventory');
+  const linkedRequest = data.getRequests().some((request) => request.providerHospitalId === hospitalId
+    && String(request.resourceName || '').trim().toLowerCase() === String(item.resourceName || '').trim().toLowerCase());
+  if (linkedRequest) throw new Error('This listing has request history and cannot be deleted. Deactivate it instead');
+  const state = data.getState();
+  state.inventory = inventory.filter((entry) => entry.id !== listingId);
+  data.setState(state);
+  data.persistInventoryDeletion(listingId);
+  return item;
+}
+
 function createResourceRequest({ requesterHospitalId, providerHospitalId, resourceName, quantity, requestType, notes, urgency }) {
+  const requester = data.getHospitals().find((hospital) => hospital.id === requesterHospitalId);
+  if (!requester || requester.role !== 'Hospital' || requester.accountStatus !== 'Active') {
+    throw new Error('Requester hospital must be active to create requests');
+  }
+  if (requesterHospitalId === providerHospitalId) {
+    throw new Error('You cannot request resources from your own hospital');
+  }
   const provider = data.getHospitals().find((hospital) => hospital.id === providerHospitalId);
-  if (!provider || provider.accountStatus !== 'Active') {
+  if (!provider || provider.role !== 'Hospital' || provider.accountStatus !== 'Active') {
     throw new Error('Provider hospital must be active to fulfill requests');
   }
+
+  const normalizedRequestType = requestType === 'Order' ? 'Order' : 'Borrow';
+  const { matchingSupplies, numericQuantity } = validatePublishedSupply(
+    providerHospitalId,
+    resourceName,
+    quantity,
+    normalizedRequestType
+  );
+  const publishedResourceName = matchingSupplies[0].resourceName;
 
   const requests = data.getRequests();
   const notifications = data.getNotifications();
@@ -289,9 +434,9 @@ function createResourceRequest({ requesterHospitalId, providerHospitalId, resour
     id: `req-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     requesterHospitalId,
     providerHospitalId,
-    resourceName,
-    quantity,
-    requestType,
+    resourceName: publishedResourceName,
+    quantity: numericQuantity,
+    requestType: normalizedRequestType,
     notes,
     urgency: URGENCY_RANK[urgency] ? urgency : 'Low',
     status: 'Pending',
@@ -305,12 +450,12 @@ function createResourceRequest({ requesterHospitalId, providerHospitalId, resour
       {
         id: `history-${Date.now()}-1`,
         status: 'Requested',
-        note: `${requesterName} requested ${quantity} ${resourceName} from ${providerName}`,
+        note: `${requesterName} requested ${numericQuantity} ${publishedResourceName} from ${providerName}`,
         timestamp,
       },
     ],
     createdAt: timestamp,
-    type: requestType || 'Borrow',
+    type: normalizedRequestType,
   };
 
   requests.push(request);
@@ -319,7 +464,7 @@ function createResourceRequest({ requesterHospitalId, providerHospitalId, resour
   state.notifications = notifications;
   notifications.unshift({
     id: `notif-${Date.now()}`,
-    message: `${requesterName} requested ${quantity} ${resourceName} from ${providerName}`,
+    message: `${requesterName} requested ${numericQuantity} ${publishedResourceName} from ${providerName}`,
     severity: 'High',
     timestamp,
   });
@@ -351,11 +496,15 @@ function respondToRequest({ requestId, responderHospitalId, response, notes }) {
     throw new Error('Doctor approval must be completed before hospital approval');
   }
 
+  if (!['approve', 'reject'].includes(response)) {
+    throw new Error('Hospital decision must be approve or reject');
+  }
+
   const status = response === 'approve' ? 'Approved' : 'Rejected';
   const responderName = data.getHospitals().find((h) => h.id === responderHospitalId)?.name || responderHospitalId;
 
   if (status === 'Approved') {
-    commitInventoryItem(request.providerHospitalId, request.resourceName, request.quantity);
+    validatePublishedSupply(request.providerHospitalId, request.resourceName, request.quantity, request.requestType || request.type);
   }
   request.providerApproval = status;
   request.providerResponseNotes = notes || '';
@@ -397,6 +546,9 @@ function reviewRequestClinicalStage({ requestId, reviewerHospitalId, reviewerRol
   }
   if (request.status !== 'Pending') {
     throw new Error('Only pending requests can move through clinical review');
+  }
+  if (!['approve', 'reject'].includes(decision)) {
+    throw new Error('Clinical decision must be approve or reject');
   }
   if (reviewerRole === 'Pharmacist') {
     if (request.providerHospitalId !== reviewerHospitalId) {
@@ -468,7 +620,7 @@ function reviewRequestClinicalStage({ requestId, reviewerHospitalId, reviewerRol
   return request;
 }
 
-function approveRequest({ requestId, approverHospitalId }) {
+function reviewAdminRequest({ requestId, approverHospitalId, decision = 'approve', notes }) {
   const requests = data.getRequests();
   const notifications = data.getNotifications();
   const request = requests.find((entry) => entry.id === requestId);
@@ -489,12 +641,20 @@ function approveRequest({ requestId, approverHospitalId }) {
     throw new Error('Hospital approval must be completed before admin approval');
   }
 
-  request.status = 'Approved';
+  if (!['approve', 'reject'].includes(decision)) {
+    throw new Error('Admin decision must be approve or reject');
+  }
+
+  if (decision === 'approve') {
+    commitInventoryItem(request.providerHospitalId, request.resourceName, request.quantity, request.requestType || request.type);
+  }
+
+  request.status = decision === 'approve' ? 'Approved' : 'Rejected';
   request.history = request.history || [];
   request.history.push({
     id: `history-${request.id}-${(request.history?.length || 0) + 1}`,
-    status: 'AdminApproved',
-    note: `Admin approved request ${requestId}`,
+    status: decision === 'approve' ? 'AdminApproved' : 'AdminRejected',
+    note: notes || `Admin ${decision === 'approve' ? 'approved' : 'rejected'} request ${requestId}`,
     timestamp: new Date().toISOString(),
   });
 
@@ -503,8 +663,8 @@ function approveRequest({ requestId, approverHospitalId }) {
   state.notifications = notifications;
   notifications.unshift({
     id: `notif-${Date.now()}`,
-    message: `Admin approved request ${requestId}`,
-    severity: 'Medium',
+    message: `Admin ${decision === 'approve' ? 'approved' : 'rejected'} request ${requestId}`,
+    severity: decision === 'approve' ? 'Medium' : 'Low',
     timestamp: new Date().toISOString(),
   });
   data.setState(state);
@@ -515,75 +675,8 @@ function approveRequest({ requestId, approverHospitalId }) {
   return request;
 }
 
-function addStaffEntry({ hospitalId, role, status, count }) {
-  const staff = data.getStaff();
-  const notifications = data.getNotifications();
-  const entry = {
-    id: `staff-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    hospitalId,
-    role,
-    status,
-    count,
-    publishedCount: count,
-    deployedCount: status === 'Deployed' ? count : 0,
-    availableCount: status === 'Available' || status === 'Deployable' ? count : 0,
-    createdAt: new Date().toISOString(),
-  };
-
-  staff.push(entry);
-  const totalAvailable = staff
-    .filter((member) => member.hospitalId === hospitalId && (member.status === 'Available' || member.status === 'Deployable'))
-    .reduce((sum, item) => sum + item.count, 0);
-
-  const state = data.getState();
-  state.staff = staff;
-  state.notifications = notifications;
-  if (totalAvailable < 3) {
-    state.notifications = [{
-      id: `notif-${Date.now()}`,
-      message: `${hospitalId} has low available staff (${totalAvailable}), please update staffing levels`,
-      severity: 'High',
-    }, ...notifications];
-  }
-  data.setState(state);
-  data.persistStaffEntry(entry);
-  return entry;
-}
-
-function createPatientSupportRequest({ hospitalId, providerHospitalId, patientType, need, priority, notes }) {
-  const requests = data.getRequests();
-  const notifications = data.getNotifications();
-  const hospitalName = data.getHospitals().find((h) => h.id === hospitalId)?.name || hospitalId;
-  const supportRequest = {
-    id: `support-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    hospitalId, // original creator
-    requesterHospitalId: hospitalId, // compatibility with request tracking
-    providerHospitalId: providerHospitalId || null,
-    patientType,
-    need,
-    priority,
-    notes,
-    status: providerHospitalId ? 'Pending' : 'Open',
-    providerApproval: providerHospitalId ? 'Pending' : undefined,
-    createdAt: new Date().toISOString(),
-    type: 'PatientSupport',
-  };
-
-  requests.push(supportRequest);
-  const state = data.getState();
-  state.requests = requests;
-  state.notifications = notifications;
-  notifications.unshift({
-    id: `notif-${Date.now()}`,
-    message: `${hospitalName} logged a ${priority.toLowerCase()} patient-support need: ${need}`,
-    severity: priority === 'High' ? 'High' : 'Medium',
-  });
-  data.setState(state);
-
-  // Persist to SQLite
-  data.persistRequest(supportRequest);
-
-  return supportRequest;
+function approveRequest({ requestId, approverHospitalId }) {
+  return reviewAdminRequest({ requestId, approverHospitalId, decision: 'approve' });
 }
 
 function getAdminSummary() {
@@ -610,7 +703,6 @@ function getAdminSummary() {
 function deleteHospitalAccount(hospitalId) {
   const hospitals = data.getHospitals();
   const inventory = data.getInventory();
-  const staff = data.getStaff();
   const requests = data.getRequests();
   const notifications = data.getNotifications();
   const deletedHospital = hospitals.find((hospital) => hospital.id === hospitalId);
@@ -618,16 +710,17 @@ function deleteHospitalAccount(hospitalId) {
   if (!deletedHospital) {
     throw new Error('Hospital not found');
   }
+  if (deletedHospital.role !== 'Hospital') {
+    throw new Error('Only hospital accounts can be deleted through hospital management');
+  }
 
   const nextHospitals = hospitals.filter((hospital) => hospital.id !== hospitalId && hospital.hospitalId !== hospitalId);
   const nextInventory = inventory.filter((item) => item.hospitalId !== hospitalId);
-  const nextStaff = staff.filter((entry) => entry.hospitalId !== hospitalId);
   const nextRequests = requests.filter((request) => request.requesterHospitalId !== hospitalId && request.providerHospitalId !== hospitalId && request.hospitalId !== hospitalId);
 
   const state = data.getState();
   state.hospitals = nextHospitals;
   state.inventory = nextInventory;
-  state.staff = nextStaff;
   state.requests = nextRequests;
   state.notifications = [{
     id: `notif-${Date.now()}`,
@@ -640,7 +733,7 @@ function deleteHospitalAccount(hospitalId) {
   // Persist to SQLite
   data.persistHospitalDeletion(hospitalId);
 
-  return { deletedHospital, nextHospitals, nextInventory, nextStaff, nextRequests };
+  return { deletedHospital, nextHospitals, nextInventory, nextRequests };
 }
 
 module.exports = {
@@ -648,15 +741,18 @@ module.exports = {
   updateHospitalEmergencyStatus,
   updateHospitalDistance,
   addResourceListing,
+  updateResourceListing,
+  setResourceListingStatus,
+  deleteResourceListing,
   createResourceRequest,
   respondToRequest,
   reviewRequestClinicalStage,
   approveRequest,
-  addStaffEntry,
-  createPatientSupportRequest,
+  reviewAdminRequest,
   getAdminSummary,
   deleteHospitalAccount,
   resetDemoData: data.resetDemoData,
   prioritizeRequests,
   getRequestPriority,
+  validatePublishedSupply,
 };

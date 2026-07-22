@@ -72,14 +72,31 @@ test('tie-breaks equal scores by distance then stock', async () => {
   assert.ok(centralScore.reasonBreakdown.distance >= 0);
 });
 
+test('uses current available stock after a transfer instead of the original published quantity', async () => {
+  await resetDemoData();
+  const state = data.getState();
+  const gloves = state.inventory.find((item) => item.hospitalId === 'hospital-riverside' && item.resourceName === 'Gloves');
+  gloves.publishedQuantity = 40;
+  gloves.availableQuantity = 35;
+  gloves.quantity = 35;
+  data.setState(state);
+
+  const riverside = state.hospitals.find((hospital) => hospital.id === 'hospital-riverside');
+  const result = await scoreHospital(riverside, 'Gloves', 5, 'Medium');
+  assert.equal(result.stock, 35);
+});
+
 test('uses requester-to-provider distance and exposes the hospital network map', async () => {
   await resetDemoData();
   const fromNorthside = await recommendHospitals({ currentHospitalId: 'hospital-demo', resourceName: 'Portable Monitors', quantity: 2, urgency: 'High' });
   const fromCentral = await recommendHospitals({ currentHospitalId: 'hospital-central', resourceName: 'Portable Monitors', quantity: 2, urgency: 'High' });
-  assert.equal(fromNorthside.find((entry) => entry.id === 'hospital-eastbay').distance, 6);
-  assert.equal(fromCentral.find((entry) => entry.id === 'hospital-eastbay').distance, 3);
+  assert.equal(fromNorthside.find((entry) => entry.id === 'hospital-eastbay').distance, 2);
+  assert.equal(fromCentral.find((entry) => entry.id === 'hospital-eastbay').distance, 1);
 
   const network = await getRecommendationNetwork({ currentHospitalId: 'hospital-demo' });
   assert.ok(network.nodes.some((node) => node.role === 'Admin'));
   assert.ok(network.edges.some((edge) => edge.from === 'hospital-demo' || edge.to === 'hospital-demo'));
+  const centralToWestbridge = network.edges.find((edge) => [edge.from, edge.to].includes('hospital-central') && [edge.from, edge.to].includes('hospital-westbridge'));
+  assert.equal(centralToWestbridge.distance, 4);
+  assert.equal(centralToWestbridge.estimated, false);
 });

@@ -3,13 +3,12 @@ const {
   resetSeedState,
   getHospitals: getSqliteHospitals,
   getInventory: getSqliteInventory,
-  getStaff: getSqliteStaff,
   getRequests: getSqliteRequests,
   getNotifications: getSqliteNotifications,
   getHospitalDistances: getSqliteHospitalDistances,
   insertHospital: sqliteInsertHospital,
   upsertInventoryItem: sqliteUpsertInventoryItem,
-  insertStaffEntry: sqliteInsertStaffEntry,
+  deleteInventoryItem: sqliteDeleteInventoryItem,
   upsertHospitalDistance: sqliteUpsertHospitalDistance,
   updateHospitalStatus: sqliteUpdateHospitalStatus,
   updateHospitalAccount: sqliteUpdateHospitalAccount,
@@ -19,7 +18,7 @@ const {
   checkEmailExists: sqliteCheckEmailExists,
 } = require('./sqlite');
 
-let state = { hospitals: [], inventory: [], staff: [], requests: [], notifications: [] };
+let state = { hospitals: [], inventory: [], requests: [], notifications: [] };
 let initialized = false;
 let initializationPromise = null;
 
@@ -31,15 +30,14 @@ async function initializeState() {
   if (!initializationPromise) {
     initializationPromise = (async () => {
       await seedDefaultUsers();
-      const [hospitals, inventory, staff, requests, notifications] = await Promise.all([
+      const [hospitals, inventory, requests, notifications] = await Promise.all([
         getSqliteHospitals(),
         getSqliteInventory(),
-        getSqliteStaff(),
         getSqliteRequests(),
         getSqliteNotifications(),
       ]);
 
-      state = { hospitals, inventory, staff, requests, notifications };
+      state = { hospitals, inventory, requests, notifications };
       initialized = true;
       return state;
     })();
@@ -65,18 +63,17 @@ function saveState() {
 async function resetDemoData() {
   initialized = false;
   initializationPromise = null;
-  state = { hospitals: [], inventory: [], staff: [], requests: [], notifications: [] };
+  state = { hospitals: [], inventory: [], requests: [], notifications: [] };
   await resetSeedState();
   await seedDefaultUsers({ force: true });
 
-  const [hospitals, inventory, staff, requests, notifications] = await Promise.all([
+  const [hospitals, inventory, requests, notifications] = await Promise.all([
     getSqliteHospitals(),
     getSqliteInventory(),
-    getSqliteStaff(),
     getSqliteRequests(),
     getSqliteNotifications(),
   ]);
-  state = { hospitals, inventory, staff, requests, notifications };
+  state = { hospitals, inventory, requests, notifications };
   initialized = true;
   return state;
 }
@@ -87,10 +84,6 @@ function getHospitals() {
 
 function getInventory() {
   return state.inventory;
-}
-
-function getStaff() {
-  return state.staff;
 }
 
 function getRequests() {
@@ -134,12 +127,8 @@ async function persistInventoryItem(item) {
   }
 }
 
-async function persistStaffEntry(entry) {
-  try {
-    await sqliteInsertStaffEntry(entry);
-  } catch (err) {
-    console.error('Failed to persist staff entry to SQLite', err);
-  }
+async function persistInventoryDeletion(itemId) {
+  await sqliteDeleteInventoryItem(itemId);
 }
 
 async function persistHospitalDistance(fromHospitalId, toHospitalId, distance) {
@@ -205,7 +194,6 @@ module.exports = {
   saveState,
   getHospitals,
   getInventory,
-  getStaff,
   getRequests,
   getNotifications,
   getHospitalDistances: getSqliteHospitalDistances,
@@ -216,7 +204,7 @@ module.exports = {
   emailExistsInMemory,
   persistHospital,
   persistInventoryItem,
-  persistStaffEntry,
+  persistInventoryDeletion,
   persistHospitalDistance,
   persistHospitalStatus,
   persistHospitalAccount,

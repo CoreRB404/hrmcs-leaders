@@ -8,9 +8,7 @@ const authRoutes = require('./routes/auth');
 const hospitalsRoutes = require('./routes/hospitals');
 const inventoryRoutes = require('./routes/inventory');
 const requestsRoutes = require('./routes/requests');
-const staffRoutes = require('./routes/staff');
 const dashboardRoutes = require('./routes/dashboard');
-const patientSupportRoutes = require('./routes/patientSupport');
 const recommendationsRoutes = require('./routes/recommendations');
 
 const app = express();
@@ -55,9 +53,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/hospitals', hospitalsRoutes);
 app.use('/api/inventory', inventoryRoutes);
 app.use('/api/requests', requestsRoutes);
-app.use('/api/staff', staffRoutes);
 app.use('/api/dashboard', dashboardRoutes.router);
-app.use('/api/patient-support', patientSupportRoutes);
 app.use('/api/recommendations', recommendationsRoutes);
 
 // Legacy compatibility endpoints
